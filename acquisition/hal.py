@@ -227,7 +227,7 @@ class LabController:
         if self._mock:
             self.camera = MockCamera()
         else:
-            self.camera = RealCamera()
+            self.camera = MockCamera()
 
         # -- Live frame buffer (refreshed by background thread) -----------
         self._live_frame: Optional[bytes] = None   # JPEG bytes
