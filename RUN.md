@@ -8,7 +8,7 @@ bash start.sh
 ```
 
 फिर select करो:
-- **1** for Web Dashboard (सबसे अच्छा) → http://localhost:8000
+- **1** for Web Dashboard (सबसे अच्छा) → git status
 - **2** for Desktop GUI (PyQt5)
 - **3** for Python Shell
 
