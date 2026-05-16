@@ -243,7 +243,7 @@ async def stage_jog(req: JogRequest):
     axis = req.axis.lower()
     if axis not in {"x", "y"}:
         raise HTTPException(400, "axis must be x or y")
-    controller.jog(axis, 1 if req.direction >= 0 else -1, req.step_mm)
+    asyncio.get_running_loop().run_in_executor(None, controller.jog, axis, 1 if req.direction >= 0 else -1, req.step_mm)
     return {"ok": True, "hardware": controller.status_dict()}
 
 
