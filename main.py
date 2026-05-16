@@ -73,8 +73,6 @@ EXPOSURE_MS = 100
 # STAGE SPEED
 # ---------------------------------
 
-MIN_VELOCITY = 20000
-
 MAX_VELOCITY = 300000
 
 ACCELERATION = 500000
@@ -138,14 +136,15 @@ stage = Thorlabs.KinesisMotor(
 # SPEED SETTINGS
 # =========================================================
 
+# Kinesis minimal velocity is effectively always zero on this controller,
+# so we rely on acceleration and max velocity for a faster stage start.
 stage.setup_velocity(
-    min_velocity=MIN_VELOCITY,
     max_velocity=MAX_VELOCITY,
     acceleration=ACCELERATION
 )
 
 print("Stage Connected")
-print(f"Stage velocity: min={MIN_VELOCITY}, max={MAX_VELOCITY}, accel={ACCELERATION}")
+print(f"Stage velocity: max={MAX_VELOCITY}, accel={ACCELERATION}")
 
 # =========================================================
 # CONNECT CAMERA
