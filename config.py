@@ -92,3 +92,28 @@ MOCK_CAMERA_TEMP_CELSIUS = 22.5   # Simulated sensor temperature
 SERVER_HOST      = "0.0.0.0"
 SERVER_PORT      = 8000
 WS_BROADCAST_HZ  = 5           # WebSocket telemetry broadcast frequency
+
+# =============================================================================
+# ENHANCED FEATURES — Dataset & Analysis
+# =============================================================================
+
+# Dataset Storage
+DATASET_BASE_PATH = "datasets"   # Root directory for TIFF stacks
+COMPRESS_CUBES = True             # Auto-compress cubes to .npz after scan
+MAX_DATASET_AGE_DAYS = 90         # Auto-archive old datasets
+
+# Analysis Configuration
+ROI_EXPORT_FORMAT = "tiff"        # "tiff" or "hdf5"
+ENABLE_SPECTRAL_CLUSTERING = True
+CLUSTERING_ALGORITHMS = ["kmeans", "dbscan"]
+
+# UI/UX Configuration
+DARK_MODE = True
+ENABLE_ADVANCED_ANALYSIS = True
+CHART_UPDATE_INTERVAL_MS = 500
+MAX_WEBSOCKET_CLIENTS = 100
+
+# Hardware Monitoring
+HARDWARE_MONITOR_INTERVAL_S = 5.0
+AUTO_DETECT_HARDWARE = True
+AUTO_RECONNECT_ENABLED = True
