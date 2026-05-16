@@ -1,0 +1,26 @@
+# HSI-Core Acquisition Software Requirements
+# Python 3.8+
+
+# Core Hardware Control
+pylablib==1.4.3
+pypylon==2.1.0
+
+# Image Processing
+opencv-python==4.8.0.76
+numpy==1.24.3
+scipy==1.11.2
+
+# GUI Framework
+PyQt5==5.15.9
+matplotlib==3.7.2
+
+# Data Handling
+Pillow==10.0.0
+
+# Server/API
+fastapi==0.103.0
+uvicorn==0.23.2
+pydantic==2.3.0
+
+# Utilities
+python-multipart==0.0.6
