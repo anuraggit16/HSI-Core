@@ -222,8 +222,7 @@ class LabController:
             self.stage_y = MockStage("Y")
         else:
             self.stage_x = RealStage(config.CONTROLLER_SERIAL_X, channel=1)
-            self.stage_y = RealStage(config.CONTROLLER_SERIAL_Y, channel=2)
-
+            self.stage_y = MockStage("Y")
         # -- Camera --------------------------------------------------------
         if self._mock:
             self.camera = MockCamera()
