@@ -267,4 +267,3 @@ print("SCAN COMPLETED SUCCESSFULLY")
 print("========================================")
 
 print(f"\nImages Saved In : {SAVE_FOLDER}")
-yes = input("\nPress Enter to Exit...")
