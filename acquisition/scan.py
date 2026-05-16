@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -183,10 +184,37 @@ class ScanEngine:
     def _run_scan(self):
         p = self._params
         import cv2, os
+        import tifffile
         from acquisition.data_cube import data_cube_manager
 
         session_path = os.path.join(config.SAVE_FOLDER, p.session_name)
         os.makedirs(session_path, exist_ok=True)
+        metadata_path = os.path.join(session_path, "metadata.json")
+        metadata = {
+            "session_name": p.session_name,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "state": "RUNNING",
+            "x_start_mm": p.x_start,
+            "x_end_mm": p.x_end,
+            "x_step_mm": p.x_step,
+            "y_start_mm": p.y_start,
+            "y_end_mm": p.y_end,
+            "y_step_mm": p.y_step,
+            "nx": p.nx,
+            "ny": p.ny,
+            "total_frames": p.total_frames,
+            "frames_acquired": 0,
+            "exposure_ms": p.exposure_ms,
+            "settling_s": p.settling_s,
+            "raster": p.raster,
+            "wavelength_min_nm": config.SPECTRAL_MIN_NM,
+            "wavelength_max_nm": config.SPECTRAL_MAX_NM,
+            "spectral_bands": config.SPECTRAL_BANDS,
+            "image_format": "tiff",
+            "mock_mode": config.MOCK_MODE,
+        }
+        with open(metadata_path, "w", encoding="utf-8") as fh:
+            json.dump(metadata, fh, indent=2)
 
         self._log(f"Scan started: {p.nx}×{p.ny} = {p.total_frames} frames")
         self._log(f"Session: {p.session_name}")
@@ -228,12 +256,29 @@ class ScanEngine:
                 crop   = raw[h//4:3*h//4, w//4:3*w//4]
                 intensity = float(np.mean(crop))
 
-                # Save frame
-                fname = os.path.join(
+                # Save scientific TIFF and browser-friendly PNG preview.
+                frame_meta = {
+                    "frame_index": frame_idx,
+                    "x_index": xi,
+                    "y_index": yi,
+                    "x_mm": round(x_mm, 6),
+                    "y_mm": round(y_mm, 6),
+                    "exposure_ms": p.exposure_ms,
+                    "wavelength_min_nm": config.SPECTRAL_MIN_NM,
+                    "wavelength_max_nm": config.SPECTRAL_MAX_NM,
+                    "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                tiff_name = os.path.join(
+                    session_path,
+                    f"frame_{frame_idx:05d}_y{yi:04d}_x{xi:04d}.tiff"
+                )
+                tifffile.imwrite(tiff_name, raw, metadata=frame_meta)
+
+                preview_name = os.path.join(
                     session_path,
                     f"frame_{frame_idx:05d}_y{yi:04d}_x{xi:04d}.png"
                 )
-                cv2.imwrite(fname, raw)
+                cv2.imwrite(preview_name, raw)
 
                 # Register with cube manager
                 data_cube_manager.record_frame(
@@ -261,6 +306,10 @@ class ScanEngine:
                 })
 
                 frame_idx += 1
+                if frame_idx % 10 == 0 or frame_idx == p.total_frames:
+                    metadata["frames_acquired"] = frame_idx
+                    with open(metadata_path, "w", encoding="utf-8") as fh:
+                        json.dump(metadata, fh, indent=2)
 
         self._finish("COMPLETED")
 
@@ -269,6 +318,22 @@ class ScanEngine:
     # ------------------------------------------------------------------
 
     def _finish(self, reason: str):
+        p = self._params
+        if p:
+            import os
+            session_path = os.path.join(config.SAVE_FOLDER, p.session_name)
+            metadata_path = os.path.join(session_path, "metadata.json")
+            if os.path.isfile(metadata_path):
+                try:
+                    with open(metadata_path, encoding="utf-8") as fh:
+                        metadata = json.load(fh)
+                    metadata["state"] = reason
+                    metadata["frames_acquired"] = self._frames_done
+                    metadata["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                    with open(metadata_path, "w", encoding="utf-8") as fh:
+                        json.dump(metadata, fh, indent=2)
+                except Exception:
+                    pass
         self.state       = ScanState.IDLE
         self._start_time = None
         self._log(f"Scan finished: {reason}")

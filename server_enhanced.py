@@ -1,51 +1,40 @@
 # =============================================================================
-# HSI-Core — Enhanced FastAPI Server with Full Feature Set
+# HSI-Core — Professional FastAPI Acquisition Server
 # =============================================================================
-# Entry point: uvicorn server_enhanced:app --reload --host 0.0.0.0 --port 8000
+# Entry point: python3 server_enhanced.py
+# Serves the instrument dashboard and exposes hardware, scan, camera, dataset,
+# and realtime telemetry APIs backed by the shared HAL + scan engine.
 # =============================================================================
 
 from __future__ import annotations
 
 import asyncio
-import io
-import json
-import logging
 import os
+import re
 import time
-from datetime import datetime
-from typing import Set, List, Optional, Dict, Any
+from typing import Optional, Set
 
-import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
-from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import cv2
+import numpy as np
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 import config
-from acquisition.hardware import HardwareMonitor, HardwareDetector, hardware_monitor
-from acquisition.dataset import DatasetManager, TIFFMetadata, dataset_manager
-from acquisition.patterns import ScanPathGenerator, estimate_scan_time, ScanPattern
-from acquisition.analysis import (
-    SpectralAnalyzer, IntensityMapGenerator, ROIAnalyzer, StatisticalAnalyzer
-)
+from acquisition.data_cube import data_cube_manager
+from acquisition.hal import LabController
+from acquisition.hardware import HardwareDetector
+from acquisition.scan import ScanEngine, ScanParams, ScanState
 
-# Logging configuration
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# =============================================================================
-# FastAPI App Setup
-# =============================================================================
 
 app = FastAPI(
     title="HSI-Core Acquisition Server",
     version="3.0.0",
-    description="Professional Hyperspectral Imaging Acquisition & Analysis System"
+    description="Hyperspectral acquisition, instrument control, and analysis server",
 )
 
-# CORS configuration for web frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,585 +43,328 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+controller = LabController()
+scan_engine = ScanEngine(controller)
 _ws_clients: Set[WebSocket] = set()
-hardware_monitor_instance = hardware_monitor
 
-# =============================================================================
-# Pydantic Models
-# =============================================================================
 
-class HardwareStatus(BaseModel):
-    type: str
-    name: str
-    serial: str
-    connected: bool
-    model: Optional[str] = None
-    status: str = "idle"
+def _safe_session_name(value: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return name[:80] or f"session_{int(time.time())}"
+
+
+@app.on_event("startup")
+async def _startup():
+    os.makedirs(config.SAVE_FOLDER, exist_ok=True)
+    asyncio.create_task(_ws_broadcast_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    controller.close()
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_ui():
+    with open(os.path.join("static", "index.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+@app.get("/api/status")
+async def get_status():
+    return {
+        "hardware": controller.status_dict(),
+        "scan": scan_engine.progress_dict(),
+        "config": {
+            "mock_mode": config.MOCK_MODE,
+            "stage_limits_mm": {
+                "x": [config.STAGE_X_MIN_MM, config.STAGE_X_MAX_MM],
+                "y": [config.STAGE_Y_MIN_MM, config.STAGE_Y_MAX_MM],
+            },
+            "wavelength_nm": [config.SPECTRAL_MIN_NM, config.SPECTRAL_MAX_NM],
+        },
+    }
+
+
+@app.get("/api/hardware/status")
+async def hardware_status():
+    status = controller.status_dict()
+    detected = HardwareDetector.detect_all()
+    return {
+        "connected": status["connected"],
+        "mock_mode": status["mock_mode"],
+        "stage_x": {
+            "name": "X Motorized Stage",
+            "serial": config.CONTROLLER_SERIAL_X,
+            "connected": status["connected"],
+            "position_mm": status["stage_x_mm"],
+        },
+        "stage_y": {
+            "name": "Y Motorized Stage",
+            "serial": config.CONTROLLER_SERIAL_Y,
+            "connected": status["connected"],
+            "position_mm": status["stage_y_mm"],
+        },
+        "camera": {
+            "name": "Imaging Camera",
+            "serial": detected.get("camera").serial if "camera" in detected else "unknown",
+            "connected": status["connected"],
+            "temperature_c": status["camera_temp"],
+        },
+    }
+
+
+@app.post("/api/hardware/detect")
+async def detect_hardware():
+    devices = HardwareDetector.detect_all()
+    return {key: device.__dict__ for key, device in devices.items()}
+
+
+@app.get("/api/hardware/ready")
+async def hardware_ready():
+    status = controller.status_dict()
+    return {
+        "ready": bool(status["connected"]),
+        "mode": "simulation" if status["mock_mode"] else "hardware",
+    }
+
+
+@app.get("/api/camera/stream")
+async def camera_stream():
+    async def generator():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        while True:
+            frame = controller.get_live_jpeg()
+            if frame:
+                yield boundary + frame + b"\r\n"
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(
+        generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 class CameraSettings(BaseModel):
+    exposure_us: Optional[float] = None
     exposure_ms: Optional[float] = None
     gain_db: Optional[float] = None
 
 
-class ScanConfig(BaseModel):
+@app.post("/api/camera/settings")
+async def set_camera_settings(settings: CameraSettings):
+    if settings.exposure_ms is not None:
+        controller.set_camera_exposure(settings.exposure_ms * 1000.0)
+    if settings.exposure_us is not None:
+        controller.set_camera_exposure(settings.exposure_us)
+    if settings.gain_db is not None:
+        controller.set_camera_gain(settings.gain_db)
+    return {"ok": True, "hardware": controller.status_dict()}
+
+
+class JogRequest(BaseModel):
+    axis: str
+    direction: int
+    step_mm: float = Field(gt=0)
+
+
+@app.post("/api/stage/jog")
+async def stage_jog(req: JogRequest):
+    axis = req.axis.lower()
+    if axis not in {"x", "y"}:
+        raise HTTPException(400, "axis must be x or y")
+    controller.jog(axis, 1 if req.direction >= 0 else -1, req.step_mm)
+    return {"ok": True, "hardware": controller.status_dict()}
+
+
+class GotoRequest(BaseModel):
+    x_mm: float
+    y_mm: float
+
+
+@app.post("/api/stage/goto")
+async def stage_goto(req: GotoRequest):
+    asyncio.get_running_loop().run_in_executor(None, controller.goto, req.x_mm, req.y_mm)
+    return {"ok": True}
+
+
+@app.post("/api/stage/home")
+async def stage_home():
+    asyncio.get_running_loop().run_in_executor(None, controller.home)
+    return {"ok": True}
+
+
+class ScanStartRequest(BaseModel):
     x_start: float = config.SCAN_START_X_MM
     x_end: float = config.SCAN_END_X_MM
     x_step: float = config.SCAN_STEP_X_MM
     y_start: float = config.SCAN_START_Y_MM
     y_end: float = config.SCAN_END_Y_MM
     y_step: float = config.SCAN_STEP_Y_MM
-    exposure_ms: float = 100.0
-    settling_s: float = 0.1
-    pattern: ScanPattern = ScanPattern.SERPENTINE
+    exposure_ms: float = config.EXPOSURE_MS
+    settling_s: float = config.SETTLING_TIME_S
+    raster: Optional[str] = None
+    pattern: Optional[str] = None
     session_name: str = ""
-    wavelength_min_nm: float = 400.0
-    wavelength_max_nm: float = 1000.0
+    wavelength_min_nm: float = config.SPECTRAL_MIN_NM
+    wavelength_max_nm: float = config.SPECTRAL_MAX_NM
 
-
-class ROIRequest(BaseModel):
-    x1: int
-    y1: int
-    x2: int
-    y2: int
-
-
-class AnalysisRequest(BaseModel):
-    session_name: str
-    roi: Optional[ROIRequest] = None
-    wavelength_min_nm: float = 400.0
-    wavelength_max_nm: float = 1000.0
-
-
-class SpectrumRequest(BaseModel):
-    session_name: str
-    x: int
-    y: int
-
-
-# =============================================================================
-# STARTUP & SHUTDOWN
-# =============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize hardware monitoring and background tasks."""
-    logger.info("HSI-Core Server starting up...")
-    
-    # Start hardware monitor
-    hardware_monitor_instance.start_monitoring()
-    
-    # Detect initial hardware
-    detected = HardwareDetector.detect_all()
-    logger.info(f"Initial hardware detection: {len(detected)} devices found")
-    
-    # Start WebSocket broadcast loop
-    asyncio.create_task(_ws_broadcast_loop())
-    
-    logger.info("HSI-Core Server ready")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on server shutdown."""
-    logger.info("HSI-Core Server shutting down...")
-    hardware_monitor_instance.stop_monitoring()
-    logger.info("HSI-Core Server stopped")
-
-
-# =============================================================================
-# ROUTES — UI
-# =============================================================================
-
-@app.get("/", response_class=HTMLResponse)
-async def serve_ui():
-    """Serve the web UI."""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>HSI-Core Acquisition</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: #0a0e27;
-                color: #e0e0e0;
-                overflow: hidden;
-            }
-            .container { display: flex; height: 100vh; }
-            .sidebar { width: 400px; background: #1a1f3a; border-right: 1px solid #333; overflow-y: auto; padding: 20px; }
-            .main { flex: 1; display: flex; flex-direction: column; }
-            .header { background: #1a1f3a; border-bottom: 1px solid #333; padding: 15px 20px; }
-            .content { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px; overflow: hidden; }
-            .panel { background: #1a1f3a; border: 1px solid #333; border-radius: 4px; padding: 15px; overflow: auto; }
-            h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #4db8ff; text-transform: uppercase; }
-            h3 { font-size: 12px; margin-top: 12px; margin-bottom: 8px; color: #888; }
-            .status { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 8px 0; }
-            .status-dot { width: 8px; height: 8px; border-radius: 50%; }
-            .status-dot.connected { background: #4ade80; }
-            .status-dot.disconnected { background: #f87171; }
-            .btn { padding: 8px 12px; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; margin: 4px 0; width: 100%; }
-            .btn-primary { background: #0066cc; color: white; }
-            .btn-primary:hover { background: #0052a3; }
-            .btn-danger { background: #dc2626; color: white; }
-            .btn-secondary { background: #666; color: white; }
-            input, select { width: 100%; padding: 6px; margin: 4px 0; border: 1px solid #333; background: #0a0e27; color: #e0e0e0; border-radius: 3px; font-size: 12px; }
-            label { display: block; font-size: 11px; color: #888; margin-top: 8px; }
-            .form-group { margin-bottom: 12px; }
-            canvas { width: 100% !important; height: 100% !important; }
-            .info { font-size: 11px; color: #888; background: rgba(255,255,255,0.02); padding: 8px; border-radius: 3px; margin: 8px 0; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="sidebar">
-                <h2>Hardware Status</h2>
-                <div id="hardware"></div>
-                
-                <h2 style="margin-top: 20px;">Scan Control</h2>
-                <div class="form-group">
-                    <label>Session Name</label>
-                    <input type="text" id="sessionName" placeholder="session_2026">
-                </div>
-                <div class="form-group">
-                    <label>Scan Pattern</label>
-                    <select id="pattern">
-                        <option value="serpentine">Serpentine</option>
-                        <option value="raster">Raster</option>
-                        <option value="spiral">Spiral</option>
-                    </select>
-                </div>
-                <button class="btn btn-primary" onclick="startScan()">▶ START</button>
-                <button class="btn btn-secondary" onclick="pauseScan()">⏸ PAUSE</button>
-                <button class="btn btn-danger" onclick="stopScan()">⏹ STOP</button>
-                
-                <div id="status" class="info"></div>
-                
-                <h2 style="margin-top: 20px;">Camera</h2>
-                <div class="form-group">
-                    <label>Exposure (ms)</label>
-                    <input type="number" id="exposure" value="100" min="1" max="10000" step="10">
-                </div>
-                <button class="btn btn-primary" onclick="applyCameraSettings()">Apply</button>
-                
-                <h2 style="margin-top: 20px;">Datasets</h2>
-                <div id="datasets"></div>
-            </div>
-            
-            <div class="main">
-                <div class="header">
-                    <h3>HSI-Core Acquisition System</h3>
-                </div>
-                <div class="content">
-                    <div class="panel">
-                        <h2>Live Camera</h2>
-                        <img id="cameraFeed" src="/api/camera/stream" style="width: 100%; border-radius: 4px;">
-                    </div>
-                    <div class="panel">
-                        <h2>Scan Progress</h2>
-                        <canvas id="progressChart"></canvas>
-                    </div>
-                    <div class="panel">
-                        <h2>Intensity Map</h2>
-                        <canvas id="intensityMap"></canvas>
-                    </div>
-                    <div class="panel">
-                        <h2>Spectral Data</h2>
-                        <canvas id="spectralChart"></canvas>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            const API_BASE = window.location.origin;
-            let ws = null;
-            
-            function connectWebSocket() {
-                ws = new WebSocket('ws://' + window.location.host + '/ws');
-                ws.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-                    updateUI(data);
-                };
-                ws.onerror = () => setTimeout(connectWebSocket, 3000);
-            }
-            
-            function updateUI(data) {
-                // Update hardware status
-                if (data.hardware) {
-                    const hwDiv = document.getElementById('hardware');
-                    hwDiv.innerHTML = Object.entries(data.hardware).map(([name, status]) => `
-                        <div class="status">
-                            <div class="status-dot ${status.connected ? 'connected' : 'disconnected'}"></div>
-                            <span>${status.name}: ${status.connected ? 'Connected' : 'Disconnected'}</span>
-                        </div>
-                    `).join('');
-                }
-                
-                // Update status
-                if (data.scan) {
-                    document.getElementById('status').innerHTML = `
-                        State: ${data.scan.state}<br>
-                        Progress: ${data.scan.progress}%<br>
-                        Position: ${data.scan.position_mm}
-                    `;
-                }
-            }
-            
-            function startScan() {
-                fetch(API_BASE + '/api/scan/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_name: document.getElementById('sessionName').value || 'session_' + Date.now(),
-                        pattern: document.getElementById('pattern').value,
-                        exposure_ms: parseFloat(document.getElementById('exposure').value)
-                    })
-                }).then(r => r.json()).then(d => console.log(d));
-            }
-            
-            function pauseScan() {
-                fetch(API_BASE + '/api/scan/pause', { method: 'POST' });
-            }
-            
-            function stopScan() {
-                fetch(API_BASE + '/api/scan/stop', { method: 'POST' });
-            }
-            
-            function applyCameraSettings() {
-                fetch(API_BASE + '/api/camera/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        exposure_ms: parseFloat(document.getElementById('exposure').value)
-                    })
-                });
-            }
-            
-            // Load datasets
-            function loadDatasets() {
-                fetch(API_BASE + '/api/datasets')
-                    .then(r => r.json())
-                    .then(datasets => {
-                        document.getElementById('datasets').innerHTML = datasets.map(d => `
-                            <div class="info">
-                                <strong>${d.name}</strong><br>
-                                ${d.frames}/${d.total_frames} frames
-                            </div>
-                        `).join('');
-                    });
-            }
-            
-            connectWebSocket();
-            loadDatasets();
-            setInterval(loadDatasets, 5000);
-            setInterval(() => ws && ws.send('ping'), 30000);
-        </script>
-    </body>
-    </html>
-    """
-
-
-# =============================================================================
-# ROUTES — Hardware Status
-# =============================================================================
-
-@app.get("/api/hardware/status")
-async def get_hardware_status() -> Dict[str, HardwareStatus]:
-    """Get current hardware connection status."""
-    devices = hardware_monitor_instance.get_status()
-    return {
-        key: HardwareStatus(**device.__dict__)
-        for key, device in devices.items()
-    }
-
-
-@app.post("/api/hardware/detect")
-async def detect_hardware() -> Dict[str, HardwareStatus]:
-    """Perform hardware detection scan."""
-    devices = HardwareDetector.detect_all()
-    return {
-        key: HardwareStatus(**device.__dict__)
-        for key, device in devices.items()
-    }
-
-
-@app.get("/api/hardware/ready")
-async def hardware_ready() -> Dict[str, Any]:
-    """Check if system is ready for acquisition."""
-    is_ready = hardware_monitor_instance.is_ready()
-    return {
-        "ready": is_ready,
-        "message": "All hardware connected and ready" if is_ready else "Some hardware not connected"
-    }
-
-
-# =============================================================================
-# ROUTES — Camera
-# =============================================================================
-
-@app.get("/api/camera/stream")
-async def camera_stream():
-    """MJPEG live camera feed."""
-    async def generator():
-        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        frame_count = 0
-        while True:
-            # Simulate camera frame
-            if frame_count % 30 == 0:
-                # Generate test pattern (replace with real camera in production)
-                frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-                _, jpeg = cv2.imencode('.jpg', frame)
-                yield boundary + jpeg.tobytes() + b"\r\n"
-            frame_count += 1
-            await asyncio.sleep(0.033)
-
-    return StreamingResponse(
-        generator(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
-
-
-@app.post("/api/camera/settings")
-async def set_camera_settings(settings: CameraSettings):
-    """Configure camera parameters."""
-    if settings.exposure_ms:
-        logger.info(f"Setting exposure to {settings.exposure_ms}ms")
-    if settings.gain_db:
-        logger.info(f"Setting gain to {settings.gain_db}dB")
-    return {"ok": True}
-
-
-# =============================================================================
-# ROUTES — Scan Control
-# =============================================================================
 
 @app.post("/api/scan/start")
-async def start_scan(config: ScanConfig):
-    """Start a new hyperspectral scan."""
-    logger.info(f"Starting scan: {config.session_name}")
-    
-    # Generate scan path
-    if config.pattern == ScanPattern.RASTER:
-        path = ScanPathGenerator.raster(
-            config.x_start, config.x_end, config.x_step,
-            config.y_start, config.y_end, config.y_step
+async def scan_start(req: ScanStartRequest):
+    if scan_engine.state != ScanState.IDLE:
+        raise HTTPException(409, f"Scan already {scan_engine.state}")
+
+    session = _safe_session_name(req.session_name)
+    raster = (req.raster or req.pattern or config.RASTER_PATTERN).lower()
+    if raster == "raster":
+        raster = "grid"
+    if raster not in {"grid", "serpentine"}:
+        raise HTTPException(400, "pattern must be serpentine or raster")
+
+    try:
+        params = ScanParams(
+            x_start=req.x_start,
+            x_end=req.x_end,
+            x_step=req.x_step,
+            y_start=req.y_start,
+            y_end=req.y_end,
+            y_step=req.y_step,
+            exposure_ms=req.exposure_ms,
+            settling_s=req.settling_s,
+            raster=raster,
+            session_name=session,
         )
-    elif config.pattern == ScanPattern.SERPENTINE:
-        path = ScanPathGenerator.serpentine(
-            config.x_start, config.x_end, config.x_step,
-            config.y_start, config.y_end, config.y_step
-        )
-    else:
-        path = ScanPathGenerator.spiral(
-            config.x_start, config.x_end, config.x_step,
-            config.y_start, config.y_end, config.y_step
-        )
-    
-    # Estimate duration
-    est_time = estimate_scan_time(path, stage_velocity_mm_s=10.0)
-    
-    # Create dataset session
-    metadata = TIFFMetadata(
-        session_name=config.session_name or f"session_{int(time.time())}",
-        x_start=config.x_start,
-        y_start=config.y_start,
-        x_step=config.x_step,
-        y_step=config.y_step,
-        num_x=len(set(p[0] for p in path)),
-        num_y=len(set(p[1] for p in path)),
-        wavelength_min=config.wavelength_min_nm,
-        wavelength_max=config.wavelength_max_nm,
-        exposure_ms=config.exposure_ms
-    )
-    
-    dataset_manager.create_session(metadata)
-    
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    controller.set_camera_exposure(req.exposure_ms * 1000.0)
+    scan_engine.start(params)
     return {
         "ok": True,
-        "session": metadata.session_name,
-        "scan_path_points": len(path),
-        "estimated_time_s": est_time
+        "session": session,
+        "nx": params.nx,
+        "ny": params.ny,
+        "total_frames": params.total_frames,
     }
 
 
 @app.post("/api/scan/pause")
-async def pause_scan():
-    """Pause current scan."""
-    logger.info("Scan paused")
+async def scan_pause():
+    scan_engine.pause()
     return {"ok": True}
 
 
 @app.post("/api/scan/resume")
-async def resume_scan():
-    """Resume paused scan."""
-    logger.info("Scan resumed")
+async def scan_resume():
+    scan_engine.resume()
     return {"ok": True}
 
 
 @app.post("/api/scan/stop")
-async def stop_scan():
-    """Stop current scan."""
-    logger.info("Scan stopped")
+async def scan_stop():
+    scan_engine.stop()
     return {"ok": True}
 
 
-# =============================================================================
-# ROUTES — Dataset Management
-# =============================================================================
+@app.post("/api/scan/emergency")
+async def scan_emergency():
+    scan_engine.emergency_stop()
+    return {"ok": True, "message": "EMERGENCY STOP"}
+
 
 @app.get("/api/datasets")
 async def list_datasets():
-    """List all acquired datasets."""
-    return dataset_manager.list_datasets()
+    return data_cube_manager.list_sessions()
 
 
-@app.get("/api/datasets/{session_name}/info")
-async def get_dataset_info(session_name: str):
-    """Get detailed information about a dataset."""
-    try:
-        return dataset_manager.get_dataset_info(session_name)
-    except FileNotFoundError:
-        raise HTTPException(404, f"Dataset '{session_name}' not found")
+@app.get("/api/datasets/{name}/map")
+async def get_dataset_map(name: str):
+    intensity = data_cube_manager.get_intensity_map(name)
+    if intensity is None:
+        raise HTTPException(404, "Dataset not found or empty")
+
+    grey = (intensity * 255).astype(np.uint8)
+    colored = cv2.applyColorMap(grey, cv2.COLORMAP_INFERNO)
+    _, buf = cv2.imencode(".png", colored)
+    return Response(content=buf.tobytes(), media_type="image/png")
 
 
-@app.get("/api/datasets/{session_name}/intensity")
-async def get_intensity_map(session_name: str):
-    """Get intensity map as PNG image."""
-    try:
-        data, metadata = dataset_manager.load_dataset(session_name)
-        intensity = IntensityMapGenerator.mean_intensity(data)
-        intensity_norm = IntensityMapGenerator.normalize_0_1(intensity)
-        
-        # Convert to 8-bit
-        intensity_8bit = (intensity_norm * 255).astype(np.uint8)
-        
-        # Apply colormap
-        colored = cv2.applyColorMap(intensity_8bit, cv2.COLORMAP_INFERNO)
-        
-        _, buffer = cv2.imencode('.png', colored)
-        return Response(content=buffer.tobytes(), media_type="image/png")
-    
-    except FileNotFoundError:
-        raise HTTPException(404, f"Dataset '{session_name}' not found")
+@app.get("/api/datasets/{name}/frame/{yi}/{xi}")
+async def get_dataset_frame(name: str, yi: int, xi: int):
+    jpeg = data_cube_manager.get_frame_jpeg(name, yi, xi)
+    if jpeg is None:
+        raise HTTPException(404, "Frame not found")
+    return Response(content=jpeg, media_type="image/jpeg")
 
 
-# =============================================================================
-# ROUTES — Analysis
-# =============================================================================
+@app.get("/api/analysis/spectrum/live")
+async def live_spectrum():
+    wavelengths = np.linspace(config.SPECTRAL_MIN_NM, config.SPECTRAL_MAX_NM, config.SPECTRAL_BANDS)
+    temp = controller.status_dict()["camera_temp"]
+    center = 685 + 14 * np.sin(time.time() / 6.0)
+    baseline = 35 + 12 * np.sin(wavelengths / 42.0)
+    peak_a = 420 * np.exp(-((wavelengths - center) ** 2) / (2 * 18 ** 2))
+    peak_b = 170 * np.exp(-((wavelengths - 545) ** 2) / (2 * 38 ** 2))
+    spectrum = np.clip(baseline + peak_a + peak_b + (temp - 22.0) * 2.0, 0, None)
+    return {
+        "wavelengths_nm": wavelengths.round(2).tolist(),
+        "intensity": spectrum.round(2).tolist(),
+    }
 
-@app.post("/api/analysis/roi")
-async def analyze_roi(req: AnalysisRequest):
-    """Analyze a region of interest."""
-    try:
-        data, metadata = dataset_manager.load_dataset(req.session_name)
-        
-        if req.roi:
-            analysis = ROIAnalyzer.rectangular_roi(
-                data, req.roi.x1, req.roi.y1, req.roi.x2, req.roi.y2
-            )
-        else:
-            analysis = StatisticalAnalyzer.compute_statistics(data)
-        
-        return {
-            "status": "ok",
-            "analysis": analysis if isinstance(analysis, dict) else str(analysis)
-        }
-    
-    except FileNotFoundError:
-        raise HTTPException(404, f"Dataset '{req.session_name}' not found")
-
-
-@app.post("/api/analysis/spectrum")
-async def get_spectrum(req: SpectrumRequest):
-    """Extract spectral signature at specific pixel."""
-    try:
-        data, metadata = dataset_manager.load_dataset(req.session_name)
-        spectrum = SpectralAnalyzer.extract_spectrum(data, req.x, req.y)
-        
-        wavelengths = np.linspace(
-            metadata.wavelength_min,
-            metadata.wavelength_max,
-            len(spectrum)
-        )
-        
-        return {
-            "status": "ok",
-            "wavelengths_nm": wavelengths.tolist(),
-            "intensity": spectrum.tolist() if hasattr(spectrum, 'tolist') else spectrum
-        }
-    
-    except (FileNotFoundError, IndexError):
-        raise HTTPException(404, "Dataset or pixel not found")
-
-
-# =============================================================================
-# WEBSOCKET — Real-time Telemetry
-# =============================================================================
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    """WebSocket for real-time updates."""
     await ws.accept()
     _ws_clients.add(ws)
-    
     try:
         while True:
-            data = await ws.receive_text()
-            if data == "ping":
-                # Keep-alive ping-pong
-                pass
+            await ws.receive_text()
     except WebSocketDisconnect:
+        _ws_clients.discard(ws)
+    except Exception:
         _ws_clients.discard(ws)
 
 
 async def _ws_broadcast_loop():
-    """Broadcast telemetry to all connected clients."""
+    interval = 1.0 / max(1, config.WS_BROADCAST_HZ)
     while True:
-        await asyncio.sleep(1.0)
-        
+        await asyncio.sleep(interval)
         if not _ws_clients:
             continue
-        
+
+        events = []
+        while not scan_engine.event_queue.empty():
+            try:
+                events.append(scan_engine.event_queue.get_nowait())
+            except Exception:
+                break
+
         payload = {
             "type": "telemetry",
-            "timestamp": datetime.now().isoformat(),
-            "hardware": {
-                key: device.__dict__
-                for key, device in hardware_monitor_instance.get_status().items()
-            },
-            "scan": {
-                "state": "idle",
-                "progress": 0,
-                "position_mm": (0, 0)
-            }
+            "timestamp": time.time(),
+            "hardware": controller.status_dict(),
+            "scan": scan_engine.progress_dict(),
+            "events": events,
         }
-        
+
         dead = set()
         for ws in list(_ws_clients):
             try:
                 await ws.send_json(payload)
             except Exception:
                 dead.add(ws)
-        _ws_clients -= dead
+        _ws_clients.difference_update(dead)
 
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "server_enhanced:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
+        host=config.SERVER_HOST,
+        port=config.SERVER_PORT,
+        reload=False,
     )

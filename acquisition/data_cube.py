@@ -84,10 +84,15 @@ class DataCubeManager:
             path = os.path.join(root, name)
             if not os.path.isdir(path):
                 continue
-            frames = [
+            scientific_frames = [
                 f for f in os.listdir(path)
-                if f.endswith(".png") or f.endswith(".jpg")
+                if f.lower().endswith((".tif", ".tiff"))
             ]
+            preview_frames = [
+                f for f in os.listdir(path)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+            frames = scientific_frames or preview_frames
             # Try to load metadata if it exists
             meta_path = os.path.join(path, "metadata.json")
             meta = {}
@@ -145,7 +150,15 @@ class DataCubeManager:
         if not os.path.isdir(path):
             return None
 
-        frames = [f for f in os.listdir(path) if f.endswith(".png")]
+        scientific_frames = [
+            f for f in os.listdir(path)
+            if f.lower().endswith((".tif", ".tiff"))
+        ]
+        preview_frames = [
+            f for f in os.listdir(path)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
+        frames = scientific_frames or preview_frames
         if not frames:
             return None
 

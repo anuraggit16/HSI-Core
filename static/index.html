@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HyperSpectra Suite - HSI Acquisition v3.0</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <header id="header">
+            <div class="brand">
+                <span class="brand-mark"></span>
+                <span>HyperSpectra Suite</span>
+                <span class="version">HSI Acquisition v3.0</span>
+            </div>
+            <nav class="menu-bar">
+                <span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span>
+            </nav>
+            <div class="toolbar" aria-label="Toolbar">
+                <button class="icon-btn" title="New session">N</button>
+                <button class="icon-btn" title="Open dataset">O</button>
+                <button class="icon-btn" title="Save session">S</button>
+                <button class="icon-btn" title="Export">E</button>
+            </div>
+            <div class="status-strip">
+                <span><i id="led-link" class="led off"></i><b id="link-label">Connecting</b></span>
+                <span><i id="led-mode" class="led warn"></i><b id="mode-label">Simulation</b></span>
+                <span id="clock">00:00:00</span>
+            </div>
+            <button id="btn-emergency" class="danger-btn">EMERGENCY STOP</button>
+        </header>
+
+        <aside id="left">
+            <section class="panel data-browser">
+                <div class="panel-head">Data Browser</div>
+                <div class="panel-body">
+                    <div class="search-row">
+                        <input id="dataset-search" type="search" placeholder="Search">
+                        <button class="small-btn" id="btn-refresh" title="Refresh datasets">R</button>
+                    </div>
+                    <ul id="session-tree" class="tree"></ul>
+                </div>
+            </section>
+
+            <section class="panel metadata">
+                <div class="panel-head">Metadata Viewer</div>
+                <table class="meta-table">
+                    <tbody id="meta-tbody">
+                        <tr><td>Name</td><td>-</td></tr>
+                        <tr><td>Frames</td><td>-</td></tr>
+                        <tr><td>Grid</td><td>-</td></tr>
+                        <tr><td>Wavelength</td><td>400-1000 nm</td></tr>
+                        <tr><td>Storage</td><td>scan_images</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="panel hardware">
+                <div class="panel-head">Hardware</div>
+                <div class="panel-body">
+                    <div class="device-row"><span>X Stage</span><b id="stage-x-pos">0.000 mm</b></div>
+                    <div class="device-row"><span>Y Stage</span><b id="stage-y-pos">0.000 mm</b></div>
+                    <div class="device-row"><span>Camera</span><b id="camera-temp">-- C</b></div>
+                    <div class="device-row"><span>Illumination</span><b id="illumination-state" class="ok">On</b></div>
+                </div>
+            </section>
+
+            <section class="panel processing">
+                <div class="panel-head">Processing Queue</div>
+                <div class="panel-body">
+                    <div id="queue-list" class="queue-list">
+                        <div class="queue-row"><span>Radiometric correction</span><b>Ready</b></div>
+                        <div class="queue-row"><span>Cube assembly</span><b>Idle</b></div>
+                        <div class="queue-row"><span>ROI extraction</span><b>Idle</b></div>
+                    </div>
+                </div>
+            </section>
+        </aside>
+
+        <main id="center">
+            <section class="panel cube-panel">
+                <div class="panel-head">
+                    <span>Data Cube</span>
+                    <span id="cube-readout">X/Y/lambda volume</span>
+                </div>
+                <div id="cube-wrap">
+                    <canvas id="cube-canvas"></canvas>
+                    <div id="live-camera">
+                        <img id="camera-feed" src="/api/camera/stream" alt="Live camera feed">
+                        <div class="camera-caption" id="camera-caption">Exposure 100 ms | Gain 0 dB</div>
+                    </div>
+                </div>
+                <div class="slice-row">
+                    <label>X-Min/Max [mm]<input id="slice-x" type="range" min="0" max="100" value="42"></label>
+                    <label>Y-Min/Max [mm]<input id="slice-y" type="range" min="0" max="100" value="70"></label>
+                    <label>Lambda Slice<input id="slice-l" type="range" min="400" max="1000" value="680"></label>
+                </div>
+            </section>
+
+            <section class="panel spectral-panel">
+                <div class="panel-head">Spectral Plot</div>
+                <div class="chart-wrap">
+                    <canvas id="spectral-chart"></canvas>
+                </div>
+                <div class="spectral-stats">
+                    <span>Peak <b id="peak-value">--</b></span>
+                    <span>Mean <b id="mean-value">--</b></span>
+                    <span>SNR <b id="snr-value">--</b></span>
+                </div>
+            </section>
+
+            <section class="panel wavelength-panel">
+                <div class="panel-head">Advanced Wavelength Range Selector</div>
+                <div class="panel-body">
+                    <div class="spectrum-bar"></div>
+                    <div class="wave-labels">
+                        <span>400</span><span>450</span><span>500</span><span>550</span><span>600</span>
+                        <span>750</span><span>850</span><span>900</span><span>950</span><span>1000</span>
+                    </div>
+                    <div class="dual-range">
+                        <label>min<input id="wl-min" type="range" min="400" max="1000" value="400"></label>
+                        <label>max<input id="wl-max" type="range" min="400" max="1000" value="1000"></label>
+                    </div>
+                    <div class="wl-readout" id="wl-readout">400 nm - 1000 nm</div>
+                </div>
+            </section>
+        </main>
+
+        <aside id="right">
+            <section class="console-title">Acquisition Control Console</section>
+
+            <section class="control-block">
+                <div class="acq-grid">
+                    <button id="btn-start" class="control-btn start">Start</button>
+                    <button id="btn-pause" class="control-btn pause" disabled>Pause</button>
+                    <button id="btn-stop" class="control-btn stop" disabled>Stop</button>
+                    <button id="btn-home" class="control-btn secondary">Home</button>
+                    <button id="btn-detect" class="control-btn secondary">Detect</button>
+                    <button id="btn-capture" class="control-btn secondary">Capture</button>
+                </div>
+                <div class="progress-line">
+                    <span id="scan-state">IDLE</span>
+                    <span id="scan-eta">ETA --</span>
+                </div>
+                <div class="progress-bar"><div id="scan-progress"></div></div>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">Stage Control</div>
+                <div class="jog-pad">
+                    <button data-jog="y:+1">Y+</button>
+                    <button data-jog="x:-1">X-</button>
+                    <input id="jog-step" type="number" min="0.01" max="25" step="0.01" value="1.00">
+                    <button data-jog="x:+1">X+</button>
+                    <button data-jog="y:-1">Y-</button>
+                </div>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">Spatial (X,Y) Scan</div>
+                <canvas id="scan-map"></canvas>
+                <div class="two-col">
+                    <label>X Range [mm]<input id="x-range" type="number" min="0.1" max="300" step="0.1" value="100"></label>
+                    <label>Y Range [mm]<input id="y-range" type="number" min="0.1" max="300" step="0.1" value="20"></label>
+                    <label>X Step [mm]<input id="x-step" type="number" min="0.01" max="10" step="0.01" value="1"></label>
+                    <label>Y Step [mm]<input id="y-step" type="number" min="0.01" max="10" step="0.01" value="1"></label>
+                </div>
+                <label class="full-field">Raster Pattern
+                    <select id="scan-pattern">
+                        <option value="serpentine">Serpentine</option>
+                        <option value="grid">Raster Grid</option>
+                    </select>
+                </label>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">Spectral (Z/lambda) Scan</div>
+                <div class="two-col">
+                    <label>Min [nm]<input id="scan-wl-min" type="number" value="400"></label>
+                    <label>Max [nm]<input id="scan-wl-max" type="number" value="1000"></label>
+                    <label>Exposure [ms]<input id="exposure-ms" type="number" min="1" max="10000" value="100"></label>
+                    <label>Gain [dB]<input id="gain-db" type="number" min="0" max="24" step="0.1" value="0"></label>
+                </div>
+                <button id="btn-apply-camera" class="wide-btn">Apply Camera</button>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">Expected Intensity Distribution</div>
+                <canvas id="histogram"></canvas>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">Real-time Sensor Monitoring</div>
+                <div class="sensor-line"><span>Camera Temperature</span><b id="temp-readout">-- C</b></div>
+                <canvas id="temp-spark"></canvas>
+                <div class="sensor-line"><span>Lens Focus Position</span><b id="focus-readout">-- ppm</b></div>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">ROI & Endmember Analysis</div>
+                <div class="roi-actions">
+                    <button class="wide-btn">Define ROI</button>
+                    <button class="wide-btn">Invert Mask</button>
+                </div>
+                <div class="roi-row"><span>1</span><canvas id="roi-spark-1"></canvas><canvas id="roi-map-1"></canvas></div>
+                <div class="roi-row"><span>2</span><canvas id="roi-spark-2"></canvas><canvas id="roi-map-2"></canvas></div>
+            </section>
+
+            <section class="control-block">
+                <div class="sect-label">File & Storage</div>
+                <label class="full-field">Session Name
+                    <input id="session-name" type="text" value="HyperSpectral_analysis">
+                </label>
+                <div class="storage-line">Storage: scan_images/</div>
+            </section>
+        </aside>
+    </div>
+
+    <div id="overlay">
+        <div class="overlay-card">
+            <h1>Connecting to Instrument</h1>
+            <p id="overlay-status">Opening telemetry channel...</p>
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
