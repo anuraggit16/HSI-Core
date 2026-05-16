@@ -35,6 +35,10 @@ class MockStage:
         with self._lock:
             return self._position
 
+    @property
+    def is_moving(self) -> bool:
+        return self._is_moving.is_set()
+
     def move_to(self, target_mm: float):
         """Non-blocking move; use wait_move() to synchronise."""
         def _run():
@@ -83,6 +87,13 @@ class RealStage:
     def position_mm(self) -> float:
         raw = self._stage.get_position()
         return raw / config.UNITS_PER_MM
+
+    @property
+    def is_moving(self) -> bool:
+        try:
+            return bool(self._stage.is_moving())
+        except Exception:
+            return False
 
     def move_to(self, target_mm: float):
         self._stage.move_to(int(target_mm * config.UNITS_PER_MM))
@@ -297,11 +308,19 @@ class LabController:
     # ------------------------------------------------------------------
 
     def status_dict(self) -> dict:
+        with self._frame_lock:
+            camera_connected = self._live_frame is not None
+        stage_x_moving = bool(getattr(self.stage_x, "is_moving", False))
+        stage_y_moving = bool(getattr(self.stage_y, "is_moving", False))
         return {
             "mock_mode"    : self._mock,
             "stage_x_mm"  : round(self.stage_x.position_mm, 4),
             "stage_y_mm"  : round(self.stage_y.position_mm, 4),
+            "stage_connected": True,
+            "stage_x_moving": stage_x_moving,
+            "stage_y_moving": stage_y_moving,
             "camera_temp" : self.camera.temperature,
+            "camera_connected": bool(camera_connected),
             "lens_focus"  : -600,      # ppm — from config if encoder available
             "illumination": True,
             "connected"   : True,

@@ -107,7 +107,8 @@ button {
 }
 
 .icon-btn,
-.small-btn {
+.small-btn,
+.small-wide-btn {
   width: 25px;
   height: 24px;
   border: 1px solid #3a4242;
@@ -115,6 +116,12 @@ button {
   background: #242a2a;
   color: #bfe5ff;
   cursor: pointer;
+}
+
+.small-wide-btn {
+  width: 100%;
+  color: #d2e7f8;
+  font-weight: 650;
 }
 
 .status-strip {
@@ -252,6 +259,23 @@ button {
   margin-bottom: 6px;
 }
 
+.save-folder-label {
+  margin-bottom: 6px;
+}
+
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 5px;
+}
+
+.path-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+
 input,
 select {
   width: 100%;
@@ -363,6 +387,10 @@ select:focus {
   overflow: hidden;
 }
 
+#cube-wrap.grabbing {
+  cursor: grabbing;
+}
+
 #cube-canvas,
 #camera-feed,
 #spectral-chart,
@@ -373,6 +401,48 @@ select:focus {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+#cube-canvas {
+  cursor: grab;
+}
+
+#cube-inspector {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  width: min(220px, calc(100% - 26px));
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  border: 1px solid rgba(130, 172, 196, .38);
+  background: rgba(7, 10, 10, .78);
+  box-shadow: 0 10px 24px rgba(0,0,0,.28);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+#cube-inspector div {
+  min-width: 0;
+  padding: 6px 7px;
+  background: rgba(19, 24, 24, .82);
+}
+
+#cube-inspector span,
+.analysis-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+#cube-inspector b,
+.analysis-grid b {
+  display: block;
+  margin-top: 2px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 #live-camera {
@@ -400,6 +470,31 @@ select:focus {
   color: #c4e5ff;
   font-size: 10px;
   font-family: var(--mono);
+}
+
+#camera-feed-status {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  padding: 2px 5px;
+  border: 1px solid rgba(242, 179, 75, .36);
+  background: rgba(16, 11, 3, .68);
+  color: #ffd177;
+  font-size: 10px;
+  font-family: var(--mono);
+  pointer-events: none;
+}
+
+#camera-feed-status.ok {
+  border-color: rgba(57, 210, 111, .34);
+  color: #9cf2b6;
+  background: rgba(4, 18, 10, .62);
+}
+
+#camera-feed-status.offline {
+  border-color: rgba(240, 91, 88, .38);
+  color: #ff9b98;
+  background: rgba(24, 5, 5, .68);
 }
 
 .slice-row {
@@ -578,6 +673,31 @@ input[type="range"] {
   grid-column: 2;
 }
 
+.jog-pad button.moving {
+  border-color: #a87324;
+  background: #392912;
+  color: #ffd98a;
+  box-shadow: 0 0 0 1px rgba(242, 179, 75, .22);
+}
+
+.stage-motion {
+  margin-top: 7px;
+  padding: 6px 7px;
+  border: 1px solid #303737;
+  border-radius: 4px;
+  background: #080c0c;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.stage-motion.moving {
+  border-color: #816426;
+  color: #ffd177;
+  background: #171207;
+}
+
 .two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -649,6 +769,65 @@ input[type="range"] {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 10px;
+}
+
+.file-drop {
+  position: relative;
+  height: 34px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 3px;
+  border: 1px dashed #496066;
+  border-radius: 5px;
+  background: #0b1010;
+  color: #c9e7f7;
+  cursor: pointer;
+}
+
+.file-drop:hover {
+  border-color: var(--cyan);
+  background: #101818;
+}
+
+.file-drop input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#analysis-preview {
+  width: 100%;
+  height: 132px;
+  margin-top: 7px;
+  border: 1px solid #303737;
+  background: #050707;
+}
+
+.analysis-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  margin-top: 6px;
+  border: 1px solid var(--line-soft);
+  background: var(--line-soft);
+}
+
+.analysis-grid span {
+  min-width: 0;
+  padding: 6px 7px;
+  background: #121616;
+}
+
+#analysis-histogram {
+  width: 100%;
+  height: 64px;
+  margin-top: 6px;
+  border: 1px solid #303737;
+  background: #050707;
 }
 
 #overlay {

@@ -77,6 +77,21 @@ python3 server_enhanced.py
 # Open browser to http://localhost:8000
 ```
 
+## One-Click Run (Windows)
+
+Double-click `run_main.bat` in the repository root to launch your existing `main.py` with a single click.
+
+If you use Visual Studio Code:
+- Open the project in VS Code
+- Open the Run and Debug view (Ctrl+Shift+D)
+- Select `Run main.py`
+- Click the green run button
+
+Or use the VS Code task:
+- Open the Command Palette (Ctrl+Shift+P)
+- Run `Tasks: Run Task`
+- Choose `Run main.py`
+
 ### Docker Setup (Optional)
 
 ```bash

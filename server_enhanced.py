@@ -55,6 +55,12 @@ def _safe_session_name(value: str) -> str:
     return name[:80] or f"session_{int(time.time())}"
 
 
+def _normalise_save_folder(value: str) -> str:
+    folder = os.path.abspath(os.path.expanduser(value.strip() or config.SAVE_FOLDER))
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
 @app.on_event("startup")
 async def _startup():
     os.makedirs(config.SAVE_FOLDER, exist_ok=True)
@@ -86,6 +92,68 @@ async def get_status():
             "wavelength_nm": [config.SPECTRAL_MIN_NM, config.SPECTRAL_MAX_NM],
         },
     }
+
+
+class StorageRequest(BaseModel):
+    save_folder: Optional[str] = None
+    current_folder: Optional[str] = None
+
+
+@app.get("/api/storage")
+async def get_storage():
+    return {
+        "save_folder": os.path.abspath(config.SAVE_FOLDER),
+    }
+
+
+@app.post("/api/storage")
+async def set_storage(req: StorageRequest):
+    if not req.save_folder:
+        raise HTTPException(400, "Save folder is required")
+    config.SAVE_FOLDER = _normalise_save_folder(req.save_folder)
+    return {
+        "ok": True,
+        "save_folder": config.SAVE_FOLDER,
+    }
+
+
+@app.post("/api/storage/browse")
+async def browse_storage(req: StorageRequest):
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        initial = _normalise_save_folder(req.current_folder or config.SAVE_FOLDER)
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(
+            initialdir=initial,
+            title="Select HSI save folder",
+        )
+        root.destroy()
+    except Exception as exc:
+        raise HTTPException(500, f"Folder browser unavailable: {exc}") from exc
+
+    if selected:
+        config.SAVE_FOLDER = _normalise_save_folder(selected)
+    return {
+        "ok": bool(selected),
+        "save_folder": config.SAVE_FOLDER,
+    }
+
+
+@app.post("/api/storage/open")
+async def open_storage(req: StorageRequest):
+    folder = _normalise_save_folder(req.save_folder or config.SAVE_FOLDER)
+    try:
+        if os.name == "nt":
+            os.startfile(folder)  # type: ignore[attr-defined]
+        else:
+            raise RuntimeError("Open folder is only configured for Windows")
+    except Exception as exc:
+        raise HTTPException(500, f"Folder could not be opened: {exc}") from exc
+    return {"ok": True, "save_folder": folder}
 
 
 @app.get("/api/hardware/status")

@@ -25,6 +25,8 @@
             </div>
             <div class="status-strip">
                 <span><i id="led-link" class="led off"></i><b id="link-label">Connecting</b></span>
+                <span><i id="led-camera" class="led off"></i><b id="camera-label">Camera --</b></span>
+                <span><i id="led-stage" class="led off"></i><b id="stage-label">Stage --</b></span>
                 <span><i id="led-mode" class="led warn"></i><b id="mode-label">Simulation</b></span>
                 <span id="clock">00:00:00</span>
             </div>
@@ -35,6 +37,16 @@
             <section class="panel data-browser">
                 <div class="panel-head">Data Browser</div>
                 <div class="panel-body">
+                    <label class="save-folder-label">Save Folder
+                        <div class="path-row">
+                            <input id="save-folder" type="text" value="scan_images">
+                            <button class="small-btn" id="btn-browse-folder" title="Browse save folder">...</button>
+                        </div>
+                    </label>
+                    <div class="path-actions">
+                        <button class="small-wide-btn" id="btn-apply-folder">Apply</button>
+                        <button class="small-wide-btn" id="btn-open-folder">Open</button>
+                    </div>
                     <div class="search-row">
                         <input id="dataset-search" type="search" placeholder="Search">
                         <button class="small-btn" id="btn-refresh" title="Refresh datasets">R</button>
@@ -86,8 +98,15 @@
                 </div>
                 <div id="cube-wrap">
                     <canvas id="cube-canvas"></canvas>
+                    <div id="cube-inspector">
+                        <div><span>X</span><b id="cube-x-detail">-- mm</b></div>
+                        <div><span>Y</span><b id="cube-y-detail">-- mm</b></div>
+                        <div><span>Lambda</span><b id="cube-l-detail">-- nm</b></div>
+                        <div><span>Intensity</span><b id="cube-i-detail">-- a.u.</b></div>
+                    </div>
                     <div id="live-camera">
                         <img id="camera-feed" src="/api/camera/stream" alt="Live camera feed">
+                        <div id="camera-feed-status">Camera signal</div>
                         <div class="camera-caption" id="camera-caption">Exposure 100 ms | Gain 0 dB</div>
                     </div>
                 </div>
@@ -155,6 +174,7 @@
                     <button data-jog="x:+1">X+</button>
                     <button data-jog="y:-1">Y-</button>
                 </div>
+                <div id="stage-motion" class="stage-motion">Stage idle | X 0.000 mm | Y 0.000 mm</div>
             </section>
 
             <section class="control-block">
@@ -213,6 +233,24 @@
                     <input id="session-name" type="text" value="HyperSpectral_analysis">
                 </label>
                 <div class="storage-line">Storage: scan_images/</div>
+            </section>
+
+            <section class="control-block upload-analysis">
+                <div class="sect-label">External Image Analysis</div>
+                <label class="file-drop" for="analysis-file">
+                    <input id="analysis-file" type="file" accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff">
+                    <span id="analysis-file-name">Select image</span>
+                </label>
+                <canvas id="analysis-preview"></canvas>
+                <div class="analysis-grid">
+                    <span>Size <b id="analysis-size">--</b></span>
+                    <span>Mean <b id="analysis-mean">--</b></span>
+                    <span>Peak <b id="analysis-peak">--</b></span>
+                    <span>Contrast <b id="analysis-contrast">--</b></span>
+                    <span>Bright ROI <b id="analysis-roi">--</b></span>
+                    <span>Color Bias <b id="analysis-bias">--</b></span>
+                </div>
+                <canvas id="analysis-histogram"></canvas>
             </section>
         </aside>
     </div>

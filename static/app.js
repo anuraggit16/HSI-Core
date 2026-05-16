@@ -8,6 +8,25 @@ const state = {
   datasets: [],
   selectedDataset: null,
   cubePhase: 0,
+  cubeView: {
+    yaw: -0.62,
+    pitch: -0.42,
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+    dragging: false,
+    dragMode: "rotate",
+    lastX: 0,
+    lastY: 0,
+    probe: { x: 0.42, y: 0.7, l: 680, intensity: 0 },
+  },
+  uploadedImage: null,
+  stage: {
+    x: 0,
+    y: 0,
+    movingUntil: 0,
+    activeJog: "",
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -17,9 +36,12 @@ document.addEventListener("DOMContentLoaded", () => {
   initClock();
   initCanvasSizing();
   bindControls();
+  initCubeInteraction();
+  initImageAnalysis();
   connectWebSocket();
   refreshStatus();
   fetchDatasets();
+  fetchStorageConfig();
   fetchSpectrum();
   setInterval(refreshStatus, 2500);
   setInterval(fetchDatasets, 9000);
@@ -53,6 +75,9 @@ function initCanvasSizing() {
 
 function bindControls() {
   $("btn-refresh").addEventListener("click", fetchDatasets);
+  $("btn-browse-folder").addEventListener("click", browseSaveFolder);
+  $("btn-apply-folder").addEventListener("click", applySaveFolder);
+  $("btn-open-folder").addEventListener("click", openSaveFolder);
   $("dataset-search").addEventListener("input", renderDatasets);
   $("btn-start").addEventListener("click", startScan);
   $("btn-pause").addEventListener("click", pauseOrResumeScan);
@@ -77,6 +102,71 @@ function bindControls() {
   ["x-range", "y-range", "x-step", "y-step", "scan-pattern"].forEach((id) => {
     $(id).addEventListener("input", drawScanMap);
   });
+
+  ["slice-x", "slice-y", "slice-l"].forEach((id) => {
+    $(id).addEventListener("input", updateCubeProbeFromControls);
+  });
+}
+
+function initCubeInteraction() {
+  const canvas = $("cube-canvas");
+  const wrap = $("cube-wrap");
+
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("pointerdown", (event) => {
+    state.cubeView.dragging = true;
+    state.cubeView.dragMode = event.button === 2 || event.shiftKey ? "pan" : "rotate";
+    state.cubeView.lastX = event.clientX;
+    state.cubeView.lastY = event.clientY;
+    wrap.classList.add("grabbing");
+    canvas.setPointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (state.cubeView.dragging) {
+      const dx = event.clientX - state.cubeView.lastX;
+      const dy = event.clientY - state.cubeView.lastY;
+      state.cubeView.lastX = event.clientX;
+      state.cubeView.lastY = event.clientY;
+      if (state.cubeView.dragMode === "pan") {
+        state.cubeView.panX += dx * (window.devicePixelRatio || 1);
+        state.cubeView.panY += dy * (window.devicePixelRatio || 1);
+      } else {
+        state.cubeView.yaw += dx * 0.008;
+        state.cubeView.pitch = clamp(state.cubeView.pitch + dy * 0.006, -1.15, 0.75);
+      }
+    }
+    updateCubeProbeFromPointer(event);
+  });
+
+  ["pointerup", "pointercancel", "pointerleave"].forEach((type) => {
+    canvas.addEventListener(type, (event) => {
+      state.cubeView.dragging = false;
+      wrap.classList.remove("grabbing");
+      try { canvas.releasePointerCapture(event.pointerId); } catch {}
+    });
+  });
+
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const nextZoom = state.cubeView.zoom * (event.deltaY > 0 ? 0.92 : 1.08);
+    state.cubeView.zoom = clamp(nextZoom, 0.68, 1.85);
+    updateCubeProbeFromPointer(event);
+  }, { passive: false });
+
+  updateCubeProbeFromControls();
+}
+
+function initImageAnalysis() {
+  const input = $("analysis-file");
+  if (!input) return;
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    $("analysis-file-name").textContent = file.name;
+    analyzeUploadedImage(file);
+  });
+  drawEmptyAnalysis();
 }
 
 function connectWebSocket() {
@@ -127,6 +217,8 @@ function updateTelemetry(data) {
     $("focus-readout").textContent = `${hw.lens_focus ?? "--"} ppm`;
     $("illumination-state").textContent = hw.illumination ? "On" : "Off";
     $("illumination-state").className = hw.illumination ? "ok" : "";
+    updateCameraConnection(hw);
+    updateStageConnection(hw);
     $("mode-label").textContent = state.mockMode ? "Simulation" : "Hardware";
     $("led-mode").className = state.mockMode ? "led warn" : "led ok";
     state.tempHistory.push(Number(hw.camera_temp || 22.5));
@@ -229,10 +321,100 @@ async function emergencyStop() {
 
 async function jog(axis, direction) {
   const step = Number($("jog-step").value);
+  markStageMoving(axis, direction, step);
   try {
-    await postJson("/api/stage/jog", { axis, direction, step_mm: step });
+    const result = await postJson("/api/stage/jog", { axis, direction, step_mm: step });
+    if (result.hardware) updateTelemetry({ hardware: result.hardware, events: [] });
   } catch {
+    clearStageMoving();
     toast("Stage jog rejected", "error");
+  }
+}
+
+function markStageMoving(axis, direction, step) {
+  const label = `${axis.toUpperCase()}${direction > 0 ? "+" : "-"}`;
+  state.stage.movingUntil = Date.now() + Math.max(900, step * 420);
+  state.stage.activeJog = label;
+  updateJogButtonHighlight(label);
+  $("stage-motion").textContent = `${state.mockMode ? "Sim moving" : "Moving"} ${label} | Step ${step.toFixed(2)} mm`;
+  $("stage-motion").classList.add("moving");
+  $("stage-label").textContent = `${state.mockMode ? "Stage Sim Moving" : "Stage Moving"} ${label}`;
+  $("led-stage").className = "led warn";
+}
+
+function clearStageMoving() {
+  state.stage.movingUntil = 0;
+  state.stage.activeJog = "";
+  updateJogButtonHighlight("");
+  $("stage-motion").classList.remove("moving");
+}
+
+function updateCameraConnection(hw) {
+  const cameraConnected = hw.camera_connected !== false;
+  if (hw.mock_mode) {
+    $("camera-label").textContent = "Camera Simulated";
+    $("led-camera").className = "led warn";
+    $("camera-feed-status").textContent = "Simulation output";
+    $("camera-feed-status").className = "";
+    return;
+  }
+
+  $("camera-label").textContent = cameraConnected ? "Camera Connected" : "Camera Offline";
+  $("led-camera").className = cameraConnected ? "led ok" : "led off";
+  $("camera-feed-status").textContent = cameraConnected ? "Live camera" : "No camera signal";
+  $("camera-feed-status").className = cameraConnected ? "ok" : "offline";
+}
+
+function updateJogButtonHighlight(label) {
+  document.querySelectorAll("[data-jog]").forEach((button) => {
+    const [axis, direction] = button.dataset.jog.split(":");
+    const buttonLabel = `${axis.toUpperCase()}${Number(direction) > 0 ? "+" : "-"}`;
+    button.classList.toggle("moving", buttonLabel === label);
+  });
+}
+
+function updateStageConnection(hw) {
+  const x = Number(hw.stage_x_mm || 0);
+  const y = Number(hw.stage_y_mm || 0);
+  const stageConnected = hw.stage_connected !== false && hw.connected !== false;
+  const backendMoving = Boolean(hw.stage_x_moving || hw.stage_y_moving);
+  const positionChanged = Math.abs(x - state.stage.x) > 0.0005 || Math.abs(y - state.stage.y) > 0.0005;
+  const moving = stageConnected && (backendMoving || positionChanged || Date.now() < state.stage.movingUntil);
+  state.stage.x = x;
+  state.stage.y = y;
+
+  if (hw.mock_mode && !moving) {
+    $("stage-label").textContent = "Stage Simulated";
+    $("led-stage").className = "led warn";
+    $("stage-motion").textContent = `Simulated stage | X ${x.toFixed(3)} mm | Y ${y.toFixed(3)} mm`;
+    $("stage-motion").classList.remove("moving");
+    state.stage.activeJog = "";
+    updateJogButtonHighlight("");
+    return;
+  }
+
+  if (!stageConnected) {
+    $("stage-label").textContent = "Stage Offline";
+    $("led-stage").className = "led off";
+    $("stage-motion").textContent = "Stage offline";
+    $("stage-motion").classList.remove("moving");
+    updateJogButtonHighlight("");
+    return;
+  }
+
+  if (moving) {
+    const active = state.stage.activeJog ? ` ${state.stage.activeJog}` : "";
+    $("stage-label").textContent = hw.mock_mode ? `Stage Sim Moving${active}` : `Stage Moving${active}`;
+    $("led-stage").className = "led warn";
+    $("stage-motion").textContent = `${hw.mock_mode ? "Sim moving" : "Moving"}${active} | X ${x.toFixed(3)} mm | Y ${y.toFixed(3)} mm`;
+    $("stage-motion").classList.add("moving");
+  } else {
+    $("stage-label").textContent = "Stage Connected";
+    $("led-stage").className = "led ok";
+    $("stage-motion").textContent = `Stage idle | X ${x.toFixed(3)} mm | Y ${y.toFixed(3)} mm`;
+    $("stage-motion").classList.remove("moving");
+    state.stage.activeJog = "";
+    updateJogButtonHighlight("");
   }
 }
 
@@ -288,6 +470,7 @@ function selectDataset(dataset) {
     <tr><td>Grid</td><td>${meta.nx || meta.num_x || "-"} x ${meta.ny || meta.num_y || "-"}</td></tr>
     <tr><td>Wavelength</td><td>${meta.wavelength_min_nm || 400}-${meta.wavelength_max_nm || 1000} nm</td></tr>
     <tr><td>Pattern</td><td>${meta.raster || "-"}</td></tr>
+    <tr><td>Storage</td><td>${$("save-folder").value || "scan_images"}</td></tr>
   `;
   loadDatasetMap(dataset.name);
 }
@@ -370,6 +553,60 @@ function drawStaticCanvases() {
   drawHistogram();
   drawTempSparkline();
   drawRoiCanvases();
+  if (state.uploadedImage && state.uploadedImage.img) {
+    renderImageAnalysis(state.uploadedImage.img, state.uploadedImage.analysis);
+  } else {
+    drawEmptyAnalysis();
+  }
+}
+
+async function fetchStorageConfig() {
+  try {
+    const storage = await fetchJson("/api/storage");
+    $("save-folder").value = storage.save_folder || "scan_images";
+    const storageCell = document.querySelector("#meta-tbody tr:last-child td:last-child");
+    if (storageCell) storageCell.textContent = storage.save_folder || "scan_images";
+  } catch {
+    $("save-folder").value = "scan_images";
+  }
+}
+
+async function browseSaveFolder() {
+  try {
+    const result = await postJson("/api/storage/browse", { current_folder: $("save-folder").value });
+    if (result.save_folder) {
+      $("save-folder").value = result.save_folder;
+      await fetchDatasets();
+      toast("Save folder selected", "success");
+    }
+  } catch (error) {
+    toast(error.message || "Folder browser could not open", "error");
+  }
+}
+
+async function applySaveFolder() {
+  const folder = $("save-folder").value.trim();
+  if (!folder) {
+    toast("Enter a save folder", "error");
+    return;
+  }
+  try {
+    const result = await postJson("/api/storage", { save_folder: folder });
+    $("save-folder").value = result.save_folder;
+    await fetchDatasets();
+    toast("Save folder applied", "success");
+  } catch (error) {
+    toast(error.message || "Save folder rejected", "error");
+  }
+}
+
+async function openSaveFolder() {
+  try {
+    await postJson("/api/storage/open", { save_folder: $("save-folder").value });
+    toast("Opening save folder", "info");
+  } catch (error) {
+    toast(error.message || "Folder could not be opened", "error");
+  }
 }
 
 function clearCanvas(canvas, color = "#050707") {
@@ -382,54 +619,181 @@ function clearCanvas(canvas, color = "#050707") {
 function drawCube() {
   const canvas = $("cube-canvas");
   const ctx = clearCanvas(canvas, "#030404");
-  const w = canvas.width;
-  const h = canvas.height;
-  const cx = w * 0.46;
-  const cy = h * 0.48;
-  const size = Math.min(w, h) * 0.48;
-  const depth = size * 0.34;
-  const phase = state.cubePhase;
+  const metrics = cubeMetrics(canvas);
+  const dpr = window.devicePixelRatio || 1;
+  const faces = [
+    { color: "#071b34", alpha: 0.76, pts: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]] },
+    { color: "#0c3642", alpha: 0.72, pts: [[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]] },
+    { color: "#0c244f", alpha: 0.74, pts: [[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]] },
+    { color: "#07152f", alpha: 0.66, pts: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]] },
+    { color: "#0b2832", alpha: 0.62, pts: [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]] },
+  ].map((face) => ({
+    ...face,
+    projected: face.pts.map((point) => projectCubePoint(point, metrics)),
+    depth: face.pts.reduce((sum, point) => sum + rotateCubePoint(point, metrics).z, 0) / face.pts.length,
+  })).sort((a, b) => a.depth - b.depth);
 
-  const front = [
-    [cx - size * 0.56, cy - size * 0.38],
-    [cx + size * 0.54, cy - size * 0.22],
-    [cx + size * 0.42, cy + size * 0.54],
-    [cx - size * 0.62, cy + size * 0.42],
-  ];
-  const back = front.map(([x, y]) => [x + depth, y - depth * 0.62]);
+  faces.forEach((face) => drawFace(ctx, face.projected.map((p) => [p.x, p.y]), face.color, face.alpha));
 
-  drawFace(ctx, [back[0], back[1], front[1], front[0]], "#10315d", 0.74);
-  drawFace(ctx, [front[1], back[1], back[2], front[2]], "#0c4b5d", 0.7);
-  drawFace(ctx, front, "#082d73", 0.78);
-
-  for (let i = 0; i < 34; i += 1) {
-    const t = i / 33;
-    const band = Math.sin(t * Math.PI * 4 + phase * 2) * 0.5 + 0.5;
-    const heat = Math.exp(-((t - 0.48) ** 2) / 0.028) + 0.5 * Math.exp(-((t - 0.76) ** 2) / 0.012);
-    const color = heatColor(clamp((band * 0.25 + heat * 0.75), 0, 1));
-    const x1 = lerp(front[0][0], front[1][0], t);
-    const y1 = lerp(front[0][1], front[1][1], t);
-    const x2 = lerp(front[3][0], front[2][0], t);
-    const y2 = lerp(front[3][1], front[2][1], t);
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.45;
-    ctx.lineWidth = Math.max(1, w / 540);
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
+  for (let z = 0; z <= 1.001; z += 0.075) {
+    const heat = cubeIntensity(0.56, 0.52, z) / 620;
+    const a = 0.12 + 0.22 * clamp(heat, 0, 1);
+    const plane = [
+      projectCubePoint([0, 0, z], metrics),
+      projectCubePoint([1, 0, z], metrics),
+      projectCubePoint([1, 1, z], metrics),
+      projectCubePoint([0, 1, z], metrics),
+    ];
+    drawFace(ctx, plane.map((p) => [p.x, p.y]), heatColor(heat), a);
   }
 
-  ctx.globalAlpha = 1;
-  drawWire(ctx, [front[0], front[1], front[2], front[3]], "#d7e4ff");
-  drawWire(ctx, [back[0], back[1], back[2], back[3]], "#9fc6ff");
-  [0, 1, 2, 3].forEach((i) => drawLine(ctx, front[i], back[i], "#9fc6ff"));
+  drawCubeGrid(ctx, metrics);
+  drawCubeWire(ctx, metrics);
+  drawCubeProbe(ctx, metrics);
 
+  const axisX = projectCubePoint([1.16, 0, 0], metrics);
+  const axisY = projectCubePoint([1, 1.14, 0], metrics);
+  const axisL = projectCubePoint([0, 1, 1.15], metrics);
+  ctx.globalAlpha = 1;
   ctx.fillStyle = "#c9d7d2";
-  ctx.font = `${Math.max(11, w / 70)}px ${getComputedStyle(document.body).fontFamily}`;
-  ctx.fillText("X [mm]", front[3][0] + size * 0.34, front[3][1] + 30);
-  ctx.fillText("Y [mm]", front[2][0] + 20, front[2][1] - size * 0.25);
-  ctx.fillText("lambda [nm]", back[0][0] - 46, back[0][1] - 8);
+  ctx.font = `${Math.max(11, canvas.width / 75)}px ${getComputedStyle(document.body).fontFamily}`;
+  ctx.fillText("X [mm]", axisX.x, axisX.y);
+  ctx.fillText("Y [mm]", axisY.x, axisY.y);
+  ctx.fillText("Lambda [nm]", axisL.x - 24 * dpr, axisL.y - 4 * dpr);
+}
+
+function cubeMetrics(canvas) {
+  const view = state.cubeView;
+  return {
+    cx: canvas.width * 0.5 + view.panX,
+    cy: canvas.height * 0.54 + view.panY,
+    scale: Math.min(canvas.width, canvas.height) * 0.58 * view.zoom,
+    yaw: view.yaw,
+    pitch: view.pitch,
+  };
+}
+
+function rotateCubePoint(point, metrics) {
+  const x = point[0] - 0.5;
+  const y = point[1] - 0.5;
+  const z = point[2] - 0.5;
+  const cy = Math.cos(metrics.yaw);
+  const sy = Math.sin(metrics.yaw);
+  const cp = Math.cos(metrics.pitch);
+  const sp = Math.sin(metrics.pitch);
+  const rx = x * cy - z * sy;
+  const rz = x * sy + z * cy;
+  const ry = y * cp - rz * sp;
+  const rz2 = y * sp + rz * cp;
+  return { x: rx, y: ry, z: rz2 };
+}
+
+function projectCubePoint(point, metrics) {
+  const rotated = rotateCubePoint(point, metrics);
+  return {
+    x: metrics.cx + rotated.x * metrics.scale,
+    y: metrics.cy - rotated.y * metrics.scale,
+    z: rotated.z,
+  };
+}
+
+function drawCubeGrid(ctx, metrics) {
+  ctx.globalAlpha = 0.52;
+  ctx.lineWidth = Math.max(1, metrics.scale / 360);
+  for (let i = 0; i <= 10; i += 1) {
+    const t = i / 10;
+    drawProjectedLine(ctx, [t, 0, 0], [t, 1, 0], metrics, "#335c70");
+    drawProjectedLine(ctx, [0, t, 0], [1, t, 0], metrics, "#335c70");
+    drawProjectedLine(ctx, [1, t, 0], [1, t, 1], metrics, "#2c6a73");
+    drawProjectedLine(ctx, [t, 1, 0], [t, 1, 1], metrics, "#3b5792");
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCubeWire(ctx, metrics) {
+  const edges = [
+    [[0, 0, 0], [1, 0, 0]], [[1, 0, 0], [1, 1, 0]], [[1, 1, 0], [0, 1, 0]], [[0, 1, 0], [0, 0, 0]],
+    [[0, 0, 1], [1, 0, 1]], [[1, 0, 1], [1, 1, 1]], [[1, 1, 1], [0, 1, 1]], [[0, 1, 1], [0, 0, 1]],
+    [[0, 0, 0], [0, 0, 1]], [[1, 0, 0], [1, 0, 1]], [[1, 1, 0], [1, 1, 1]], [[0, 1, 0], [0, 1, 1]],
+  ];
+  ctx.lineWidth = Math.max(1, metrics.scale / 260);
+  edges.forEach(([a, b]) => drawProjectedLine(ctx, a, b, metrics, "#d7e4ff"));
+}
+
+function drawProjectedLine(ctx, a, b, metrics, color) {
+  const p1 = projectCubePoint(a, metrics);
+  const p2 = projectCubePoint(b, metrics);
+  drawLine(ctx, [p1.x, p1.y], [p2.x, p2.y], color);
+}
+
+function drawCubeProbe(ctx, metrics) {
+  const probe = state.cubeView.probe;
+  const x = clamp(probe.x / 100, 0, 1);
+  const y = clamp(probe.y / 100, 0, 1);
+  const z = clamp((probe.l - 400) / 600, 0, 1);
+  const p = projectCubePoint([x, y, z], metrics);
+  const floor = projectCubePoint([x, y, 0], metrics);
+  const ceiling = projectCubePoint([x, y, 1], metrics);
+  const dpr = window.devicePixelRatio || 1;
+
+  ctx.globalAlpha = 0.9;
+  ctx.setLineDash([4 * dpr, 5 * dpr]);
+  drawLine(ctx, [floor.x, floor.y], [ceiling.x, ceiling.y], "#f2b34b");
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = "#f7e483";
+  ctx.strokeStyle = "#171100";
+  ctx.lineWidth = 2 * dpr;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 5.2 * dpr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "#f6f9ed";
+  ctx.font = `${11 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+  ctx.fillText(`${Math.round(probe.l)} nm`, p.x + 8 * dpr, p.y - 8 * dpr);
+  ctx.globalAlpha = 1;
+}
+
+function updateCubeProbeFromControls() {
+  const x = Number($("slice-x").value);
+  const y = Number($("slice-y").value);
+  const l = Number($("slice-l").value);
+  setCubeProbe(x, y, l);
+}
+
+function updateCubeProbeFromPointer(event) {
+  const canvas = $("cube-canvas");
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const px = (event.clientX - rect.left) * dpr;
+  const py = (event.clientY - rect.top) * dpr;
+  const metrics = cubeMetrics(canvas);
+  const xNorm = clamp((px - metrics.cx) / (metrics.scale * 0.95) + 0.5, 0, 1);
+  const yNorm = clamp(0.5 - (py - metrics.cy) / (metrics.scale * 0.9), 0, 1);
+  const l = Number($("slice-l").value);
+  $("slice-x").value = Math.round(xNorm * 100);
+  $("slice-y").value = Math.round(yNorm * 100);
+  setCubeProbe(xNorm * 100, yNorm * 100, l);
+}
+
+function setCubeProbe(x, y, l) {
+  const z = clamp((l - 400) / 600, 0, 1);
+  const intensity = cubeIntensity(x / 100, y / 100, z);
+  state.cubeView.probe = { x, y, l, intensity };
+  $("cube-x-detail").textContent = `${x.toFixed(1)} mm`;
+  $("cube-y-detail").textContent = `${y.toFixed(1)} mm`;
+  $("cube-l-detail").textContent = `${Math.round(l)} nm`;
+  $("cube-i-detail").textContent = `${intensity.toFixed(1)} a.u.`;
+}
+
+function cubeIntensity(x, y, z) {
+  const spatialA = Math.exp(-(((x - 0.58) ** 2) / 0.032 + ((y - 0.42) ** 2) / 0.044));
+  const spatialB = 0.62 * Math.exp(-(((x - 0.28) ** 2) / 0.018 + ((y - 0.72) ** 2) / 0.025));
+  const spectralA = Math.exp(-((z - 0.47) ** 2) / 0.012);
+  const spectralB = 0.5 * Math.exp(-((z - 0.78) ** 2) / 0.006);
+  const ripple = 0.08 * (Math.sin((x + state.cubePhase) * 8) + Math.cos((y - state.cubePhase) * 7));
+  return 34 + 520 * clamp((spatialA + spatialB) * (0.55 + spectralA + spectralB) / 2.15 + ripple, 0, 1);
 }
 
 function drawFace(ctx, points, color, alpha) {
@@ -620,6 +984,156 @@ function drawMiniMap(canvas, center) {
       ctx.fillRect(x * cw, y * ch, Math.ceil(cw), Math.ceil(ch));
     }
   }
+}
+
+function drawEmptyAnalysis() {
+  const preview = $("analysis-preview");
+  const hist = $("analysis-histogram");
+  if (!preview || !hist) return;
+  const pctx = clearCanvas(preview, "#050707");
+  pctx.fillStyle = "#65706c";
+  pctx.font = `${11 * (window.devicePixelRatio || 1)}px ${getComputedStyle(document.body).fontFamily}`;
+  pctx.fillText("No image loaded", 12 * (window.devicePixelRatio || 1), 24 * (window.devicePixelRatio || 1));
+  clearCanvas(hist, "#050707");
+}
+
+function analyzeUploadedImage(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    const analysis = sampleImage(img);
+    state.uploadedImage = { name: file.name, img, analysis };
+    renderImageAnalysis(img, analysis);
+    toast("Image analysis ready", "success");
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    toast("Image format could not be decoded in browser", "error");
+  };
+  img.src = url;
+}
+
+function sampleImage(img) {
+  const maxSide = 420;
+  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const sample = document.createElement("canvas");
+  sample.width = w;
+  sample.height = h;
+  const ctx = sample.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const hist = Array(64).fill(0);
+  let sum = 0;
+  let sumSq = 0;
+  let peak = 0;
+  let rSum = 0;
+  let gSum = 0;
+  let bSum = 0;
+  const lumas = [];
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    lumas.push(luma);
+    sum += luma;
+    sumSq += luma * luma;
+    rSum += r;
+    gSum += g;
+    bSum += b;
+    peak = Math.max(peak, luma);
+    hist[Math.min(hist.length - 1, Math.floor((luma / 256) * hist.length))] += 1;
+  }
+
+  const count = Math.max(1, lumas.length);
+  const mean = sum / count;
+  const contrast = Math.sqrt(Math.max(0, sumSq / count - mean * mean));
+  const threshold = percentile(lumas, 0.9);
+  let bx = 0;
+  let by = 0;
+  let brightCount = 0;
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const luma = lumas[y * w + x];
+      if (luma >= threshold) {
+        bx += x;
+        by += y;
+        brightCount += 1;
+      }
+    }
+  }
+  const colorMeans = [rSum / count, gSum / count, bSum / count];
+  const channels = ["R", "G", "B"];
+  const dominant = channels[colorMeans.indexOf(Math.max(...colorMeans))];
+  const brightPct = (brightCount / count) * 100;
+
+  return {
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+    sampleWidth: w,
+    sampleHeight: h,
+    mean,
+    peak,
+    contrast,
+    hist,
+    roi: brightCount ? { x: (bx / brightCount) / w, y: (by / brightCount) / h, pct: brightPct } : null,
+    bias: `${dominant} ${Math.max(...colorMeans).toFixed(0)}`,
+  };
+}
+
+function percentile(values, p) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
+
+function renderImageAnalysis(img, analysis) {
+  const canvas = $("analysis-preview");
+  const ctx = clearCanvas(canvas, "#050707");
+  const scale = Math.min(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+  const drawW = img.naturalWidth * scale;
+  const drawH = img.naturalHeight * scale;
+  const dx = (canvas.width - drawW) / 2;
+  const dy = (canvas.height - drawH) / 2;
+  ctx.drawImage(img, dx, dy, drawW, drawH);
+
+  if (analysis.roi) {
+    const x = dx + analysis.roi.x * drawW;
+    const y = dy + analysis.roi.y * drawH;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.strokeStyle = "#f2b34b";
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    ctx.arc(x, y, 10 * dpr, 0, Math.PI * 2);
+    ctx.stroke();
+    drawLine(ctx, [x - 14 * dpr, y], [x + 14 * dpr, y], "#f2b34b");
+    drawLine(ctx, [x, y - 14 * dpr], [x, y + 14 * dpr], "#f2b34b");
+  }
+
+  $("analysis-size").textContent = `${analysis.width} x ${analysis.height}`;
+  $("analysis-mean").textContent = `${analysis.mean.toFixed(1)} a.u.`;
+  $("analysis-peak").textContent = `${analysis.peak.toFixed(1)} a.u.`;
+  $("analysis-contrast").textContent = `${analysis.contrast.toFixed(1)}`;
+  $("analysis-roi").textContent = analysis.roi ? `${analysis.roi.pct.toFixed(1)}% @ ${Math.round(analysis.roi.x * 100)},${Math.round(analysis.roi.y * 100)}` : "--";
+  $("analysis-bias").textContent = analysis.bias;
+  drawAnalysisHistogram(analysis.hist);
+}
+
+function drawAnalysisHistogram(hist) {
+  const canvas = $("analysis-histogram");
+  const ctx = clearCanvas(canvas, "#050707");
+  const max = Math.max(1, ...hist);
+  const barW = canvas.width / hist.length;
+  hist.forEach((value, index) => {
+    const t = index / (hist.length - 1);
+    const h = (value / max) * canvas.height * 0.88;
+    ctx.fillStyle = heatColor(t);
+    ctx.fillRect(index * barW, canvas.height - h, Math.max(1, barW - 1), h);
+  });
 }
 
 function heatColor(t) {
