@@ -1,13 +1,15 @@
 # =============================================================================
 # HSI-Core — Hardware Abstraction Layer (HAL)
 # =============================================================================
-# Provides a unified LabController that works identically in Mock and Real mode.
-# All hardware-specific code is encapsulated here. Switch MOCK_MODE in config.py.
+# Single-axis hyperspectral architecture
+#
+# Spatial scan  -> X stage motion
+# Spectral scan -> wavelength dimension
+# Camera         -> live acquisition
 # =============================================================================
 
 from __future__ import annotations
 
-import io
 import math
 import threading
 import time
@@ -17,201 +19,304 @@ import numpy as np
 
 import config
 
+
 # =============================================================================
-# STAGE INTERFACES
+# MOCK STAGE
 # =============================================================================
 
 class MockStage:
-    """Simulates a Thorlabs linear stage with realistic velocity-based timing."""
 
     def __init__(self, name: str = "X"):
-        self.name        = name
-        self._position   = 0.0       # mm
-        self._is_moving  = threading.Event()
-        self._lock       = threading.Lock()
+
+        self.name = name
+
+        self._position = 0.0
+
+        self._is_moving = threading.Event()
+
+        self._lock = threading.Lock()
 
     @property
     def position_mm(self) -> float:
+
         with self._lock:
             return self._position
 
     @property
     def is_moving(self) -> bool:
+
         return self._is_moving.is_set()
 
     def move_to(self, target_mm: float):
-        """Non-blocking move; use wait_move() to synchronise."""
+
         def _run():
+
             with self._lock:
                 start = self._position
-            dist   = abs(target_mm - start)
+
+            dist = abs(target_mm - start)
+
             t_move = dist / config.MOCK_STAGE_VELOCITY_MM_S
-            steps  = max(1, int(t_move / 0.02))
+
+            steps = max(1, int(t_move / 0.02))
+
             for i in range(steps + 1):
+
                 frac = i / steps
+
                 with self._lock:
-                    self._position = start + (target_mm - start) * frac
+                    self._position = (
+                        start
+                        + (target_mm - start) * frac
+                    )
+
                 time.sleep(t_move / steps)
+
             self._is_moving.clear()
 
         self._is_moving.set()
-        threading.Thread(target=_run, daemon=True).start()
+
+        threading.Thread(
+            target=_run,
+            daemon=True
+        ).start()
 
     def wait_move(self):
-        self._is_moving.wait()
+
+        while self.is_moving:
+            time.sleep(0.01)
 
     def home(self):
+
         self.move_to(0.0)
 
     def close(self):
+
         pass
 
 
-class RealStage:
-    """Wraps pylablib.Thorlabs.KinesisMotor for a single-axis Thorlabs stage."""
+# =============================================================================
+# REAL STAGE
+# =============================================================================
 
-    def __init__(self, serial: str, channel: int = 1):
-        from pylablib.devices import Thorlabs  # type: ignore
+class RealStage:
+    """
+    Real Thorlabs Kinesis stage
+    Auto-detects connected controller
+    """
+
+    def __init__(self, channel: int = 1):
+
+        from pylablib.devices import Thorlabs
+
+        devices = Thorlabs.list_kinesis_devices()
+
+        print(f"[HSI] Detected Kinesis devices: {devices}")
+
+        if not devices:
+            raise RuntimeError(
+                "No Thorlabs Kinesis devices detected"
+            )
+
+        serial = devices[0][0]
+
+        print(f"[HSI] Using stage serial: {serial}")
+
         self._stage = Thorlabs.KinesisMotor(
             serial,
             is_rack_system=True,
             default_channel=channel
         )
+
         self._stage.setup_velocity(
-            min_velocity  = config.STAGE_MIN_VELOCITY,
-            max_velocity  = config.STAGE_MAX_VELOCITY,
-            acceleration  = config.STAGE_ACCELERATION,
+            min_velocity=config.STAGE_MIN_VELOCITY,
+            max_velocity=config.STAGE_MAX_VELOCITY,
+            acceleration=config.STAGE_ACCELERATION,
         )
 
     @property
     def position_mm(self) -> float:
+
         raw = self._stage.get_position()
+
         return raw / config.UNITS_PER_MM
 
     @property
     def is_moving(self) -> bool:
+
         try:
             return bool(self._stage.is_moving())
         except Exception:
             return False
 
     def move_to(self, target_mm: float):
-        self._stage.move_to(int(target_mm * config.UNITS_PER_MM))
+
+        self._stage.move_to(
+            int(target_mm * config.UNITS_PER_MM)
+        )
 
     def wait_move(self):
+
         self._stage.wait_move()
 
     def home(self):
+
         self._stage.home(sync=True)
 
     def close(self):
+
         self._stage.close()
 
 
 # =============================================================================
-# CAMERA INTERFACES
+# MOCK CAMERA
 # =============================================================================
 
 class MockCamera:
-    """
-    Generates synthetic hyperspectral-like frames.
-    Produces a Gaussian feature blob with Poisson shot noise and slight drift.
-    """
 
     def __init__(self):
+
         self._exposure_us = config.EXPOSURE_US
-        self._gain_db     = config.CAMERA_GAIN_DB
-        self._frame_no    = 0
-        self._temperature = config.MOCK_CAMERA_TEMP_CELSIUS
+
+        self._gain_db = config.CAMERA_GAIN_DB
+
+        self._frame_no = 0
+
+        self._temperature = (
+            config.MOCK_CAMERA_TEMP_CELSIUS
+        )
 
     def set_exposure(self, us: float):
+
         self._exposure_us = us
 
     def set_gain(self, db: float):
+
         self._gain_db = db
 
     def grab_frame(self) -> np.ndarray:
-        """Return a uint8 grayscale frame (H x W)."""
-        h, w = config.MOCK_FRAME_HEIGHT, config.MOCK_FRAME_WIDTH
+
+        h = config.MOCK_FRAME_HEIGHT
+
+        w = config.MOCK_FRAME_WIDTH
+
         y, x = np.ogrid[:h, :w]
 
-        # Slowly drifting Gaussian blob
-        t    = self._frame_no * 0.05
-        cx   = w // 2 + 60 * math.sin(t)
-        cy   = h // 2 + 40 * math.cos(t * 0.7)
-        blob = 180 * np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * 60 ** 2))
+        t = self._frame_no * 0.05
 
-        # Secondary smaller feature
-        cx2  = w // 4
-        cy2  = h // 3
-        blob += 80 * np.exp(-((x - cx2) ** 2 + (y - cy2) ** 2) / (2 * 30 ** 2))
+        cx = w // 2 + 60 * math.sin(t)
 
-        # Exposure scaling (linear)
-        scale = self._exposure_us / 100_000.0
-        blob  = blob * scale
+        cy = h // 2 + 40 * math.cos(t * 0.7)
 
-        # Poisson shot noise
-        frame = np.random.poisson(np.clip(blob, 0, 255)).astype(np.float32)
-        frame = np.clip(frame, 0, 255).astype(np.uint8)
+        blob = 180 * np.exp(
+            -(
+                (x - cx) ** 2
+                + (y - cy) ** 2
+            )
+            / (2 * 60 ** 2)
+        )
+
+        scale = self._exposure_us / 100000.0
+
+        blob *= scale
+
+        frame = np.random.poisson(
+            np.clip(blob, 0, 255)
+        ).astype(np.float32)
+
+        frame = np.clip(
+            frame,
+            0,
+            255
+        ).astype(np.uint8)
+
         self._frame_no += 1
+
         return frame
 
     @property
     def temperature(self) -> float:
-        # Slight random walk
+
         self._temperature += np.random.normal(0, 0.02)
+
         return round(self._temperature, 2)
 
     def close(self):
+
         pass
 
 
+# =============================================================================
+# REAL CAMERA
+# =============================================================================
+
 class RealCamera:
-    """Wraps pypylon InstantCamera for Basler GigE/USB3 cameras."""
 
     def __init__(self):
-        from pypylon import pylon  # type: ignore
+
+        from pypylon import pylon
+
         self._cam = pylon.InstantCamera(
             pylon.TlFactory.GetInstance().CreateFirstDevice()
         )
+
         self._cam.Open()
-        self._cam.ExposureTime.SetValue(config.EXPOSURE_US)
-        self._temperature_ok = hasattr(self._cam, "DeviceTemperature")
+
+        self._cam.ExposureTime.SetValue(
+            config.EXPOSURE_US
+        )
+
+        self._temperature_ok = hasattr(
+            self._cam,
+            "DeviceTemperature"
+        )
 
     def set_exposure(self, us: float):
+
         self._cam.ExposureTime.SetValue(us)
 
     def set_gain(self, db: float):
+
         try:
             self._cam.Gain.SetValue(db)
         except Exception:
             pass
 
     def grab_frame(self) -> np.ndarray:
+
         result = self._cam.GrabOne(5000)
+
         if result.GrabSucceeded():
+
             return result.Array
-        raise RuntimeError("Camera grab failed")
+
+        raise RuntimeError(
+            "Camera grab failed"
+        )
 
     @property
     def temperature(self) -> float:
+
         if self._temperature_ok:
-            return float(self._cam.DeviceTemperature.GetValue())
+
+            return float(
+                self._cam.DeviceTemperature.GetValue()
+            )
+
         return -999.0
 
     def close(self):
+
         self._cam.Close()
 
 
 # =============================================================================
-# UNIFIED LAB CONTROLLER
+# LAB CONTROLLER
 # =============================================================================
 
 class LabController:
     """
-    Single-axis hyperspectral controller.
-    Spatial scan = X stage motion
-    Spectral scan = wavelength axis
+    Single-axis hyperspectral controller
     """
 
     def __init__(self):
@@ -219,31 +324,35 @@ class LabController:
         self._mock = config.MOCK_MODE
 
         # ============================================================
-        # SINGLE STAGE
+        # STAGE
         # ============================================================
 
         if self._mock:
+
             self.stage = MockStage("X")
+
         else:
-            self.stage = RealStage(
-                config.CONTROLLER_SERIAL_X,
-                channel=1
-            )
+
+            self.stage = RealStage(channel=1)
 
         # ============================================================
         # CAMERA
         # ============================================================
 
         if self._mock:
+
             self.camera = MockCamera()
+
         else:
+
             self.camera = RealCamera()
 
         # ============================================================
-        # LIVE STREAM THREAD
+        # LIVE FRAME BUFFER
         # ============================================================
 
-        self._live_frame = None
+        self._live_frame: Optional[bytes] = None
+
         self._frame_lock = threading.Lock()
 
         self._running = True
@@ -276,16 +385,19 @@ class LabController:
                 )
 
                 with self._frame_lock:
+
                     self._live_frame = buf.tobytes()
 
             except Exception as e:
-                print("Camera loop error:", e)
+
+                print("[HSI] Camera loop error:", e)
 
             time.sleep(0.05)
 
     def get_live_jpeg(self):
 
         with self._frame_lock:
+
             return self._live_frame
 
     # ================================================================
@@ -304,7 +416,11 @@ class LabController:
     # STAGE CONTROL
     # ================================================================
 
-    def jog(self, direction: int, step_mm: float):
+    def jog(
+        self,
+        direction: int,
+        step_mm: float
+    ):
 
         target = (
             self.stage.position_mm
@@ -342,6 +458,7 @@ class LabController:
     def status_dict(self):
 
         with self._frame_lock:
+
             camera_connected = (
                 self._live_frame is not None
             )
@@ -363,7 +480,9 @@ class LabController:
 
             "camera_temp": self.camera.temperature,
 
-            "camera_connected": bool(camera_connected),
+            "camera_connected": bool(
+                camera_connected
+            ),
 
             "illumination": True,
 
