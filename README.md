@@ -77,6 +77,49 @@ python3 server_enhanced.py
 # Open browser to http://localhost:8000
 ```
 
+## Production Lab Startup
+
+Use only one backend process when real hardware is attached. Multiple Uvicorn
+processes can lock FTDI/Kinesis or Basler devices and make the app fall back to
+mock mode.
+
+```bash
+# Windows PowerShell
+venv\Scripts\python.exe -m uvicorn server_enhanced:app --host 127.0.0.1 --port 8000
+
+# macOS/Linux
+source venv/bin/activate
+python -m uvicorn server_enhanced:app --host 127.0.0.1 --port 8000
+```
+
+The UI now trusts the unified `HardwareState` only. A device is shown connected
+only after a real stage command or camera frame grab succeeds.
+
+### Mock Mode
+
+Set this in `config.py` for development without lab hardware:
+
+```python
+MOCK_MODE = True
+DEBUG_MODE = True
+```
+
+With `MOCK_MODE = False`, the system tries real hardware first. If stage or
+camera health checks fail after 3 attempts, it automatically switches to mock
+fallback and records the reason in `logs/hardware_log.jsonl`.
+
+### Hardware Troubleshooting
+
+- Camera says "Busy or Disconnected": close other apps or old server processes
+  using the Basler camera, then run `POST /api/hardware/detect`.
+- Stage says fallback: confirm the Thorlabs Kinesis service/driver is installed,
+  the BBD302/DDS300 serial in `config.py` is correct, and no other backend owns
+  the FTDI device.
+- Logs: inspect `GET /api/logs/latest` and `GET /api/logs/errors`.
+- Safe reset: `POST /api/stage/home` stops an active scan, stops the live stream,
+  homes or mock-homes the stage, and returns the UI to Overview.
+- Calibration: use `POST /api/stage/zero` or the UI Zero Calibration button.
+
 ## One-Click Run (Windows)
 
 Double-click `run_main.bat` in the repository root to launch your existing `main.py` with a single click.
@@ -139,6 +182,23 @@ print(roi_stats['mean_spectrum'])
 ```bash
 # Get hardware status
 curl http://localhost:8000/api/hardware/status
+
+# Force safe hardware re-detect
+curl -X POST http://localhost:8000/api/hardware/detect
+
+# Latest structured hardware logs
+curl http://localhost:8000/api/logs/latest
+
+# Camera stream control
+curl -X POST http://localhost:8000/api/camera/start
+curl -X POST http://localhost:8000/api/camera/stop
+
+# Stage home/move/zero
+curl -X POST http://localhost:8000/api/stage/home
+curl -X POST http://localhost:8000/api/stage/move \
+  -H "Content-Type: application/json" \
+  -d '{"x_mm": 10.0}'
+curl -X POST http://localhost:8000/api/stage/zero
 
 # Start scan
 curl -X POST http://localhost:8000/api/scan/start \

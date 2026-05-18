@@ -3,6 +3,10 @@ venv/
 
 scan_images/
 
+logs/*.log
+logs/*.jsonl
+logs/*.lock
+
 __pycache__/
 *.pyc
 
