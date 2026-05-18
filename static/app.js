@@ -5,6 +5,7 @@ const state = {
   processingActive: false,
   liveProcessingEnabled: false,
   mockMode: true,
+  hardwareState: { mode: "MOCK", last_error: "" },
   scan: { state: "IDLE", percent: 0, nx: 0, ny: 0, session: "" },
   heatmap: [],
   tempHistory: Array(80).fill(22.5),
@@ -13,6 +14,9 @@ const state = {
   errors: [],
   selectedDataset: null,
   cubePhase: 0,
+  showLiveCube: false,
+  cubeRenderable: false,
+  cubeNeedsDraw: true,
   cubeView: {
     yaw: -0.62,
     pitch: -0.42,
@@ -64,6 +68,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindClientErrorLogging();
   initClock();
   initCanvasSizing();
+  initPersistedLayout();
   bindControls();
   initCubeInteraction();
   initImageAnalysis();
@@ -104,6 +109,31 @@ function initCanvasSizing() {
   };
   window.addEventListener("resize", resize);
   setTimeout(resize, 60);
+}
+
+function initPersistedLayout() {
+  const nodes = Array.from(document.querySelectorAll("#left, #right, .panel, .control-block, .analysis-canvas-wrap, .mini-plot, .camera-stage"));
+  const keyFor = (node, index) => `hsi-layout:${node.id || node.className || "node"}:${index}`;
+  nodes.forEach((node, index) => {
+    const key = keyFor(node, index);
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || "null");
+      if (saved?.width) node.style.width = saved.width;
+      if (saved?.height) node.style.height = saved.height;
+    } catch {}
+    let timer = null;
+    const observer = new ResizeObserver(([entry]) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const rect = entry.target.getBoundingClientRect();
+        localStorage.setItem(key, JSON.stringify({
+          width: rect.width ? `${Math.round(rect.width)}px` : "",
+          height: rect.height ? `${Math.round(rect.height)}px` : "",
+        }));
+      }, 250);
+    });
+    observer.observe(node);
+  });
 }
 
 function bindControls() {
@@ -156,12 +186,13 @@ function bindControls() {
   });
 
   bindIf("analysis-file-large", "change", () => {
-    const file = $("analysis-file-large").files && $("analysis-file-large").files[0];
-    if (!file) return;
-    $("analysis-file-name-large").textContent = file.name;
-    $("analysis-file-name").textContent = file.name;
+    const files = Array.from($("analysis-file-large").files || []);
+    if (!files.length) return;
+    const label = fileSelectionLabel(files);
+    $("analysis-file-name-large").textContent = label;
+    $("analysis-file-name").textContent = label;
     setPage("analysis");
-    analyzeUploadedImage(file);
+    analyzeUploadedFiles(files);
   });
 
   bindIf("analysis-zoom-large", "input", () => {
@@ -188,10 +219,19 @@ function bindControls() {
 
   bindIf("btn-reset-analysis", "click", resetAnalysisView);
   bindIf("btn-apply-camera-large", "click", applyCameraSettingsFromLarge);
+  bindIf("btn-camera-start", "click", startCameraStream);
+  bindIf("btn-camera-stop", "click", stopCameraStream);
   bindIf("btn-detect-large", "click", detectHardware);
   bindIf("btn-refresh-errors", "click", fetchErrors);
   bindIf("btn-home-diagnostics", "click", homeStage);
+  bindIf("btn-zero-stage", "click", zeroStage);
+  bindIf("btn-zero-diagnostics", "click", zeroStage);
   bindIf("btn-detect-diagnostics", "click", detectHardware);
+  bindIf("show-live-cube", "change", () => {
+    state.showLiveCube = $("show-live-cube").checked;
+    state.cubeNeedsDraw = true;
+    if (state.showLiveCube && state.processingActive) fetchSpectrum();
+  });
 
   ["slice-x", "slice-y", "slice-l"].forEach((id) => {
     $(id).addEventListener("input", updateCubeProbeFromControls);
@@ -294,13 +334,14 @@ function initImageAnalysis() {
   const input = $("analysis-file");
   if (!input) return;
   input.addEventListener("change", () => {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    $("analysis-file-name").textContent = file.name;
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    const label = fileSelectionLabel(files);
+    $("analysis-file-name").textContent = label;
     const largeName = $("analysis-file-name-large");
-    if (largeName) largeName.textContent = file.name;
+    if (largeName) largeName.textContent = label;
     setPage("analysis");
-    analyzeUploadedImage(file);
+    analyzeUploadedFiles(files);
   });
 
   const bindCanvasPan = (canvas) => {
@@ -408,7 +449,7 @@ function updateModeUi() {
   document.querySelectorAll(".mode-btn[data-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === state.mode);
   });
-  $("mode-label").textContent = `${state.mockMode ? "Simulation" : "Hardware"} | ${state.mode}`;
+  $("mode-label").textContent = `${state.hardwareState.mode || (state.mockMode ? "MOCK" : "REAL")} | ${state.mode}`;
   $("live-processing").checked = state.liveProcessingEnabled;
   $("processing-state").textContent = state.processingActive ? "ON" : "OFF";
   $("processing-state").className = state.processingActive ? "ok" : "";
@@ -444,6 +485,10 @@ function updateTelemetry(data) {
     const stageMoving = Boolean(hw.stage_x_moving ?? hw.stage_moving);
     const stageStatus = hw.stage_status || (stageMoving ? "moving" : "idle");
     state.mockMode = Boolean(hw.mock_mode);
+    state.hardwareState = hw.hardware_state || {
+      mode: hw.mode || (state.mockMode ? "MOCK" : "REAL"),
+      last_error: hw.last_error || "",
+    };
     $("stage-x-pos").textContent = `${xPos.toFixed(3)} mm`;
     $("stage-y-pos").textContent = stageStatus;
     $("camera-temp").textContent = `${Number(hw.camera_temp || 0).toFixed(1)} C`;
@@ -456,7 +501,7 @@ function updateTelemetry(data) {
     updateCameraConnection(hw);
     updateStageConnection(hw);
     updateDiagnosticsStatus(hw);
-    $("mode-label").textContent = `${state.mockMode ? "Simulation" : "Hardware"} | ${state.mode}`;
+    $("mode-label").textContent = `${state.hardwareState.mode || (state.mockMode ? "MOCK" : "REAL")} | ${state.mode}`;
     $("led-mode").className = state.mockMode ? "led warn" : "led ok";
     state.tempHistory.push(Number(hw.camera_temp || 22.5));
     state.tempHistory.shift();
@@ -493,7 +538,15 @@ function updateScanUi() {
   $("scan-eta").textContent = `ETA ${s.eta || "--"}s`;
   $("scan-counter").textContent = `${s.framesDone || 0}/${s.totalFrames || 0}`;
   $("scan-progress").style.width = `${clamp(s.percent, 0, 100)}%`;
-  $("cube-readout").textContent = s.nx ? `${s.nx} position scan | ${s.framesDone}/${s.totalFrames}` : "X/lambda volume";
+  if (s.nx && (state.showLiveCube || state.cubeRenderable)) {
+    $("cube-readout").textContent = `${s.nx} position scan | ${s.framesDone}/${s.totalFrames}`;
+  } else if (!state.analysisCube) {
+    $("cube-readout").textContent = "Waiting for scan or upload";
+  }
+  if (["STOPPED", "ScanState.STOPPED"].includes(s.state) && s.framesDone > 0) {
+    state.cubeRenderable = true;
+    state.cubeNeedsDraw = true;
+  }
 
   const idle = ["IDLE", "STOPPED", "ERROR", "ScanState.IDLE"].includes(s.state);
   const running = s.state === "RUNNING" || s.state === "ScanState.RUNNING";
@@ -515,6 +568,10 @@ function handleEvent(event) {
     const index = Number(event.yi) * nx + Number(event.xi);
     state.heatmap[index] = Number(event.intensity || 0);
     drawScanMap();
+    if (state.showLiveCube) {
+      state.cubeRenderable = true;
+      state.cubeNeedsDraw = true;
+    }
   }
 
   if (event.type === "log") {
@@ -555,6 +612,8 @@ async function startScan() {
     state.processingActive = true;
     updateModeUi();
     state.heatmap = Array(result.nx * result.ny).fill(0);
+    state.cubeRenderable = state.showLiveCube;
+    state.cubeNeedsDraw = true;
     toast(`Scan started: ${result.session}`, "success");
     fetchDatasets();
   } catch (error) {
@@ -591,6 +650,20 @@ async function homeStage() {
     const result = await postJson("/api/stage/home");
     if (result.hardware) updateTelemetry({ hardware: result.hardware, events: [] });
     $("goto-x").value = "0.00";
+    state.mode = "LIVE";
+    state.processingActive = false;
+    state.liveProcessingEnabled = false;
+    state.heatmap = [];
+    state.showLiveCube = false;
+    state.analysisCube = null;
+    state.uploadedImage = null;
+    state.spectrum = { wavelengths: [], intensity: [] };
+    state.cubeRenderable = false;
+    state.cubeNeedsDraw = true;
+    const liveCube = $("show-live-cube");
+    if (liveCube) liveCube.checked = false;
+    setPage(result.target_page || "overview");
+    updateModeUi();
     toast(result.message || "Stage homed to zero", result.physical_home ? "success" : "info");
   } catch (error) {
     reportUiError(error.message || "Home failed", "stage/home");
@@ -671,9 +744,9 @@ function clearStageMoving() {
 }
 
 function updateCameraConnection(hw) {
-  const cameraConnected = hw.camera_connected === true;
+  const cameraConnected = hw.camera_connected === true && hw.camera_streaming === true && hw.camera_physical_connected === true;
   const cameraStatus = String(hw.camera_status || (cameraConnected ? "connected" : "disconnected"));
-  const streamAvailable = hw.camera_stream_available !== false;
+  const streamAvailable = hw.camera_stream_available === true || hw.camera_streaming === true;
   const fallback = Boolean(hw.camera_fallback_stream);
 
   const setCameraText = (label, led, feedText, feedClass) => {
@@ -696,18 +769,23 @@ function updateCameraConnection(hw) {
     if (streamLarge) streamLarge.textContent = streamAvailable ? "Active" : "Waiting";
   };
 
-  if (cameraStatus === "simulation") {
-    setCameraText("Camera Simulated", "led warn", "Simulation output", "warn");
-    return;
-  }
-
   if (cameraConnected) {
     setCameraText("Camera Connected", "led ok", "Live camera", "ok");
     return;
   }
 
-  if (fallback || streamAvailable) {
-    setCameraText("Camera Fallback", "led warn", "Fallback stream active", "warn");
+  if (cameraStatus === "reconnecting") {
+    setCameraText("Reconnecting...", "led warn", "Reconnecting...", "warn");
+    return;
+  }
+
+  if (fallback || cameraStatus === "mock" || (streamAvailable && !hw.camera_physical_connected)) {
+    setCameraText("Mock Mode Active", "led warn", "Mock Mode Active", "warn");
+    return;
+  }
+
+  if (cameraStatus === "busy_disconnected" || hw.camera_locked) {
+    setCameraText("Camera Busy or Disconnected", "led off", "Camera Disconnected", "offline");
     return;
   }
 
@@ -800,6 +878,37 @@ async function detectHardware() {
   }
 }
 
+async function zeroStage() {
+  try {
+    const result = await postJson("/api/stage/zero");
+    if (result.hardware) updateTelemetry({ hardware: result.hardware, events: [] });
+    toast("Stage zero calibration saved", "success");
+  } catch (error) {
+    reportUiError(error.message || "Zero calibration failed", "stage/zero");
+    toast(error.message || "Zero calibration failed", "error");
+  }
+}
+
+async function startCameraStream() {
+  try {
+    const result = await postJson("/api/camera/start");
+    if (result.hardware) updateTelemetry({ hardware: result.hardware, events: [] });
+    toast("Camera stream started", "success");
+  } catch (error) {
+    toast(error.message || "Camera stream could not start", "error");
+  }
+}
+
+async function stopCameraStream() {
+  try {
+    const result = await postJson("/api/camera/stop");
+    if (result.hardware) updateTelemetry({ hardware: result.hardware, events: [] });
+    toast("Camera stream stopped", "info");
+  } catch (error) {
+    toast(error.message || "Camera stream could not stop", "error");
+  }
+}
+
 async function fetchDatasets() {
   try {
     state.datasets = await fetchJson("/api/datasets");
@@ -828,8 +937,13 @@ function updateDiagnosticsStatus(hw = {}) {
 
 async function fetchErrors() {
   try {
-    const result = await fetchJson("/api/errors");
-    state.errors = Array.isArray(result.errors) ? result.errors.slice(-50).reverse() : [];
+    let result = await fetchJson("/api/logs/errors");
+    let errors = Array.isArray(result.errors) ? result.errors : [];
+    if (!errors.length) {
+      result = await fetchJson("/api/errors");
+      errors = Array.isArray(result.errors) ? result.errors : [];
+    }
+    state.errors = errors.slice(-50).reverse();
   } catch {
     state.errors = [];
   }
@@ -861,7 +975,7 @@ function renderErrors() {
     return;
   }
 
-  state.errors.forEach((entry) => {
+  state.errors.slice(0, 10).forEach((entry) => {
     const row = document.createElement("div");
     const category = classifyError(entry);
     const critical = ["camera", "stage", "scan"].includes(category);
@@ -1010,6 +1124,8 @@ function loadAnalysisDataset(dataset) {
     height: analysis.height,
     session: dataset.name,
   };
+  state.cubeRenderable = true;
+  state.cubeNeedsDraw = true;
   state.spectrum = {
     processing_active: true,
     wavelengths_nm: wavelengthsForProfile(profile),
@@ -1100,12 +1216,20 @@ async function postJson(url, body = {}) {
 }
 
 function drawLoop() {
-  if (state.processingActive) {
+  const liveCube = state.showLiveCube && state.processingActive;
+  const shouldDrawCube = state.cubeRenderable || liveCube;
+  if (liveCube) {
     state.cubePhase += 0.01;
   }
-  drawCube();
+  if (shouldDrawCube && (liveCube || state.cubeNeedsDraw)) {
+    drawCube();
+    state.cubeNeedsDraw = false;
+  } else if (!shouldDrawCube && state.cubeNeedsDraw) {
+    drawCubePlaceholder();
+    state.cubeNeedsDraw = false;
+  }
   drawSpectralChart();
-  if (state.processingActive) {
+  if (liveCube) {
     requestAnimationFrame(drawLoop);
   } else {
     setTimeout(() => requestAnimationFrame(drawLoop), 1000);
@@ -1178,6 +1302,18 @@ function clearCanvas(canvas, color = "#050707") {
   ctx.fillStyle = color;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   return ctx;
+}
+
+function drawCubePlaceholder() {
+  const canvas = $("cube-canvas");
+  const ctx = clearCanvas(canvas, "#030404");
+  const dpr = window.devicePixelRatio || 1;
+  ctx.fillStyle = "#65706c";
+  ctx.font = `${12 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+  ctx.fillText("Cube view is idle", 16 * dpr, 28 * dpr);
+  ctx.fillStyle = "#9ba7a2";
+  ctx.font = `${10 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+  ctx.fillText("Upload a hyperspectral file, finish a scan, or enable live view.", 16 * dpr, 48 * dpr);
 }
 
 function drawCube() {
@@ -1573,6 +1709,20 @@ function drawEmptyAnalysis() {
   updateAnalysisFields(null);
 }
 
+function fileSelectionLabel(files) {
+  return files.length === 1 ? files[0].name : `${files.length} files selected`;
+}
+
+function analyzeUploadedFiles(files) {
+  const first = files[0];
+  const needsServer = files.length > 1 || /\.(tif|tiff|npy|csv|hdr|img|dat)$/i.test(first.name);
+  if (needsServer) {
+    uploadAnalysisFiles(files);
+    return;
+  }
+  analyzeUploadedImage(first);
+}
+
 function analyzeUploadedImage(file) {
   if (state.mode !== "ANALYSIS") {
     setControlMode("ANALYSIS");
@@ -1591,6 +1741,8 @@ function analyzeUploadedImage(file) {
     state.uploadedImage = { name: file.name, img, analysis };
     state.analysisCube = { shape: [analysis.height, analysis.width, analysis.bands], bands: analysis.bands, profile: analysis.profile, width: analysis.width, height: analysis.height, session: file.name };
     state.spectrum = { processing_active: true, wavelengths_nm: wavelengthsForProfile(analysis.profile), intensity: analysis.profile };
+    state.cubeRenderable = true;
+    state.cubeNeedsDraw = true;
     $("cube-readout").textContent = `Loaded image | ${analysis.width} x ${analysis.height}`;
     updateAnalysisControls(analysis);
     updateAnalysisFields(analysis);
@@ -1605,25 +1757,30 @@ function analyzeUploadedImage(file) {
 }
 
 function analyzeTiffFile(file) {
+  uploadAnalysisFiles([file]);
+}
+
+function uploadAnalysisFiles(files) {
   const form = new FormData();
-  form.append("file", file);
-  toast("TIFF upload started", "info");
+  files.forEach((file) => form.append("files", file));
+  const label = fileSelectionLabel(files);
+  toast("Analysis upload started", "info");
 
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/analysis/tiff/upload");
+  xhr.open("POST", "/api/analysis/upload");
 
   xhr.upload.onprogress = (event) => {
     if (!event.lengthComputable) return;
     const pct = Math.round((event.loaded / event.total) * 100);
-    $("analysis-file-name").textContent = `${file.name} | ${pct}%`;
+    $("analysis-file-name").textContent = `${label} | ${pct}%`;
     const largeName = $("analysis-file-name-large");
-    if (largeName) largeName.textContent = `${file.name} | ${pct}%`;
+    if (largeName) largeName.textContent = `${label} | ${pct}%`;
   };
 
   xhr.onload = () => {
     if (xhr.status < 200 || xhr.status >= 300) {
-      reportUiError(xhr.responseText || "TIFF upload failed", "analysis/upload");
-      toast(xhr.responseText || "TIFF upload failed", "error");
+      reportUiError(xhr.responseText || "Analysis upload failed", "analysis/upload");
+      toast(xhr.responseText || "Analysis upload failed", "error");
       fetchErrors();
       return;
     }
@@ -1632,20 +1789,20 @@ function analyzeTiffFile(file) {
     try {
       result = JSON.parse(xhr.responseText);
     } catch (error) {
-      reportUiError(error.message || "Invalid TIFF upload response", "analysis/upload");
-      toast("TIFF response could not be read", "error");
+      reportUiError(error.message || "Invalid analysis upload response", "analysis/upload");
+      toast("Analysis response could not be read", "error");
       return;
     }
-    handleTiffResult(file.name, result);
-    $("analysis-file-name").textContent = file.name;
+    handleTiffResult(label, result);
+    $("analysis-file-name").textContent = label;
     const largeName = $("analysis-file-name-large");
-    if (largeName) largeName.textContent = file.name;
-    toast("TIFF analysis ready", "success");
+    if (largeName) largeName.textContent = label;
+    toast("Analysis ready", "success");
   };
 
   xhr.onerror = () => {
-    reportUiError("TIFF upload network failure", "analysis/upload");
-    toast("TIFF upload failed", "error");
+    reportUiError("Analysis upload network failure", "analysis/upload");
+    toast("Analysis upload failed", "error");
     fetchErrors();
   };
 
@@ -1688,7 +1845,9 @@ function handleTiffResult(name, result) {
     wavelengths_nm: wavelengthsForProfile(profile),
     intensity: profile,
   };
-  state.processingActive = true;
+  state.processingActive = false;
+  state.cubeRenderable = true;
+  state.cubeNeedsDraw = true;
   $("cube-readout").textContent = `Uploaded cube | ${analysis.width} x ${analysis.height} x ${bands}`;
   updateSpectralStats();
   updateAnalysisControls(analysis);

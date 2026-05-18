@@ -106,8 +106,12 @@
             <section class="panel cube-panel">
                 <div class="panel-head">
                     <span>Data Cube</span>
-                    <span id="cube-readout">X/Y/lambda volume</span>
+                    <span id="cube-readout">Waiting for scan or upload</span>
                 </div>
+                <label class="cube-toggle">
+                    <input id="show-live-cube" type="checkbox">
+                    <span>Show Live Hyperspectral View</span>
+                </label>
                 <div id="cube-wrap">
                     <canvas id="cube-canvas"></canvas>
                     <div id="cube-inspector">
@@ -186,6 +190,7 @@
                     <button data-jog="x:+1">Right</button>
                     <input id="goto-x" type="number" min="0" max="300" step="0.01" value="0.00">
                     <button id="btn-goto" class="wide-btn">Go To</button>
+                    <button id="btn-zero-stage" class="wide-btn">Zero Calibration</button>
                 </div>
                 <div id="stage-motion" class="stage-motion">Stage idle | X 0.000 mm</div>
             </section>
@@ -267,7 +272,7 @@
             <section class="control-block upload-analysis">
                 <div class="sect-label">Analysis Mode</div>
                 <label class="file-drop" for="analysis-file">
-                    <input id="analysis-file" type="file" accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff">
+                    <input id="analysis-file" type="file" multiple accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff,.npy,.csv,.hdr,.img,.dat">
                     <span id="analysis-file-name">Select TIFF or image</span>
                 </label>
                 <label class="full-field">Zoom<input id="analysis-zoom" type="range" min="1" max="5" step="0.1" value="1"></label>
@@ -293,7 +298,7 @@
                 </div>
                 <div class="analysis-workbench">
                     <label class="file-drop analysis-drop" for="analysis-file-large">
-                        <input id="analysis-file-large" type="file" accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff">
+                        <input id="analysis-file-large" type="file" multiple accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff,.npy,.csv,.hdr,.img,.dat">
                         <span id="analysis-file-name-large">Select TIFF or image</span>
                     </label>
                     <div class="analysis-canvas-wrap">
@@ -367,6 +372,8 @@
                         <label>Gain [dB]<input id="camera-page-gain" type="number" min="0" max="24" step="0.1" value="0"></label>
                     </div>
                     <button id="btn-apply-camera-large" class="wide-btn">Apply Camera</button>
+                    <button id="btn-camera-start" class="wide-btn">Start Stream</button>
+                    <button id="btn-camera-stop" class="wide-btn">Stop Stream</button>
                     <button id="btn-detect-large" class="wide-btn">Detect Hardware</button>
                     <div class="camera-health">
                         <div class="device-row"><span>Stream</span><b id="camera-stream-health">--</b></div>
@@ -382,11 +389,12 @@
             <section class="panel diagnostics-main">
                 <div class="panel-head">
                     <span>Diagnostics</span>
-                    <span id="diagnostics-log-path">logs/system.log</span>
+                    <span id="diagnostics-log-path">logs/hardware_log.jsonl</span>
                 </div>
                 <div class="diagnostic-actions">
                     <button id="btn-refresh-errors" class="wide-btn">Refresh Errors</button>
                     <button id="btn-home-diagnostics" class="wide-btn">Home Stage</button>
+                    <button id="btn-zero-diagnostics" class="wide-btn">Zero Calibration</button>
                     <button id="btn-detect-diagnostics" class="wide-btn">Detect Hardware</button>
                 </div>
                 <div id="diagnostics-errors" class="diagnostic-error-list"></div>

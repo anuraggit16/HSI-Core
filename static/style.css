@@ -530,6 +530,22 @@ select:focus {
   overflow: hidden;
 }
 
+.cube-toggle {
+  height: 28px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--line);
+  background: #101515;
+}
+
+.cube-toggle input {
+  width: auto;
+  height: auto;
+}
+
 #cube-wrap.grabbing {
   cursor: grabbing;
 }
@@ -589,18 +605,7 @@ select:focus {
 }
 
 #live-camera {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  width: min(38%, 230px);
-  aspect-ratio: 4 / 3;
-  border: 1px solid #4a5454;
-  background: #050606;
-  box-shadow: 0 8px 18px rgba(0,0,0,.32);
-  resize: both;
-  overflow: auto;
-  min-width: 140px;
-  min-height: 105px;
+  display: none;
 }
 
 #camera-feed {
@@ -825,6 +830,10 @@ input[type="range"] {
 
 .stage-control-grid #goto-x {
   grid-column: span 2;
+}
+
+#btn-zero-stage {
+  grid-column: 1 / -1;
 }
 
 .jog-pad button:first-child,
@@ -1195,7 +1204,7 @@ body:not([data-mode="analysis"]) .upload-analysis .analysis-grid {
 
 .diagnostic-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding: 8px;
   border-bottom: 1px solid var(--line);
