@@ -14,6 +14,8 @@
   --amber: #f2b34b;
   --red: #f05b58;
   --violet: #ba77ff;
+  --magenta: #ff6aa2;
+  --ink: #0a0d10;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -26,6 +28,7 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--ui);
@@ -43,11 +46,12 @@ button {
 }
 
 #app {
-  width: 100vw;
+  width: 100%;
+  max-width: 100%;
   height: 100vh;
   display: grid;
-  grid-template-columns: 236px minmax(520px, 1fr) 312px;
-  grid-template-rows: 38px 1fr;
+  grid-template-columns: minmax(180px, 18vw) minmax(360px, 1fr) minmax(250px, 24vw);
+  grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
     "header header header"
     "left center right";
@@ -61,6 +65,7 @@ button {
   gap: 12px;
   min-width: 0;
   padding: 0 10px;
+  min-height: 38px;
   background: #151818;
   border-bottom: 1px solid #363c3c;
   box-shadow: inset 0 -1px 0 #090a0a;
@@ -106,6 +111,38 @@ button {
   border-left: 1px solid var(--line);
 }
 
+.mode-switch {
+  display: flex;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.workspace-tabs {
+  display: flex;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.page-tab {
+  height: 24px;
+  min-width: 72px;
+  border: 1px solid #384242;
+  border-radius: 4px;
+  background: #1b2222;
+  color: #b9c8c4;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.page-tab.active {
+  border-color: #315f8f;
+  background: linear-gradient(180deg, #17314a, #112334);
+  color: #cbe9ff;
+}
+
 .icon-btn,
 .small-btn,
 .small-wide-btn {
@@ -122,6 +159,24 @@ button {
   width: 100%;
   color: #d2e7f8;
   font-weight: 650;
+}
+
+.mode-btn {
+  height: 24px;
+  min-width: 54px;
+  border: 1px solid #3a4242;
+  border-radius: 4px;
+  background: #202626;
+  color: #b7c7c2;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.mode-btn.active {
+  border-color: #24784c;
+  background: #123424;
+  color: #83f0aa;
 }
 
 .status-strip {
@@ -170,7 +225,7 @@ button {
 #right,
 #center {
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 #left {
@@ -181,6 +236,7 @@ button {
   padding: 6px;
   border-right: 1px solid var(--line);
   background: #0d1010;
+  resize: horizontal;
 }
 
 #center {
@@ -201,6 +257,60 @@ button {
   overflow-y: auto;
   border-left: 1px solid var(--line);
   background: #0d1010;
+  resize: horizontal;
+}
+
+.workspace-page {
+  grid-row: 2;
+  grid-column: 2 / 4;
+  min-height: 0;
+  min-width: 0;
+  display: none;
+  gap: 6px;
+  padding: 6px;
+  overflow: auto;
+  background: #090c0d;
+}
+
+body[data-page="analysis"] #center,
+body[data-page="analysis"] #right,
+body[data-page="camera"] #left,
+body[data-page="camera"] #center,
+body[data-page="camera"] #right,
+body[data-page="diagnostics"] #center,
+body[data-page="diagnostics"] #right {
+  display: none;
+}
+
+body[data-page="analysis"] #analysis-page,
+body[data-page="camera"] #camera-page,
+body[data-page="diagnostics"] #diagnostics-page {
+  display: grid;
+}
+
+body[data-page="camera"] #camera-page {
+  grid-column: 1 / 4;
+}
+
+#analysis-page {
+  grid-template-columns: minmax(420px, 1fr) minmax(260px, 320px);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+#camera-page {
+  grid-template-columns: minmax(560px, 1fr) minmax(260px, 340px);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+#diagnostics-page {
+  grid-template-columns: minmax(460px, 1fr) minmax(250px, 320px);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.cube-panel,
+.spectral-panel,
+.wavelength-panel {
+  resize: both;
 }
 
 .panel,
@@ -209,12 +319,13 @@ button {
   border: 1px solid var(--line);
   border-radius: 5px;
   min-width: 0;
+  resize: vertical;
+  overflow: auto;
 }
 
 .panel {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .panel-head,
@@ -248,10 +359,10 @@ button {
   min-height: 0;
 }
 
-.data-browser { flex: 0 0 220px; }
-.metadata { flex: 0 0 158px; }
-.hardware { flex: 0 0 130px; }
-.processing { flex: 1 1 auto; min-height: 130px; }
+.data-browser { flex: 1 1 13rem; min-height: 9rem; }
+.metadata { flex: 1 1 9rem; min-height: 7rem; }
+.hardware { flex: 1 1 10rem; min-height: 8rem; }
+.processing { flex: 2 1 11rem; min-height: 8rem; }
 
 .search-row {
   display: flex;
@@ -367,6 +478,38 @@ select:focus {
   border-bottom: 1px solid var(--line-soft);
 }
 
+.queue-list {
+  max-height: 100%;
+  overflow: auto;
+}
+
+.error-row {
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.error-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.error-row b {
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+
+.error-row.critical b {
+  color: var(--red);
+}
+
+.error-row.warning b {
+  color: var(--amber);
+}
+
+.error-row.empty b {
+  color: var(--green);
+}
+
 .device-row span,
 .queue-row span,
 .sensor-line span {
@@ -454,6 +597,10 @@ select:focus {
   border: 1px solid #4a5454;
   background: #050606;
   box-shadow: 0 8px 18px rgba(0,0,0,.32);
+  resize: both;
+  overflow: auto;
+  min-width: 140px;
+  min-height: 105px;
 }
 
 #camera-feed {
@@ -717,6 +864,57 @@ input[type="range"] {
   gap: 6px;
 }
 
+.check-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.check-row label {
+  height: 26px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  border: 1px solid #303737;
+  border-radius: 4px;
+  background: #0b0f0f;
+}
+
+.check-row input {
+  width: auto;
+  height: auto;
+}
+
+.toggle-row {
+  height: 28px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  margin-bottom: 7px;
+  border: 1px solid #303737;
+  border-radius: 4px;
+  background: #0b0f0f;
+}
+
+.toggle-row input {
+  width: auto;
+  height: auto;
+}
+
+.toggle-row b {
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.toggle-row b.ok {
+  color: var(--green);
+}
+
 .full-field {
   margin-top: 6px;
 }
@@ -818,6 +1016,16 @@ input[type="range"] {
   margin-top: 7px;
   border: 1px solid #303737;
   background: #050707;
+  cursor: grab;
+}
+
+body:not([data-mode="analysis"]) .upload-analysis {
+  opacity: .64;
+}
+
+body:not([data-mode="analysis"]) .upload-analysis canvas,
+body:not([data-mode="analysis"]) .upload-analysis .analysis-grid {
+  filter: saturate(.45);
 }
 
 .analysis-grid {
@@ -841,6 +1049,169 @@ input[type="range"] {
   margin-top: 6px;
   border: 1px solid #303737;
   background: #050707;
+}
+
+.analysis-main,
+.camera-main,
+.diagnostics-main {
+  min-height: 0;
+  resize: both;
+}
+
+.analysis-controls-panel,
+.camera-controls-panel,
+.diagnostics-status {
+  min-height: 0;
+  resize: horizontal;
+}
+
+.analysis-workbench {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-rows: auto minmax(260px, 1fr) 170px;
+  gap: 7px;
+  padding: 8px;
+}
+
+.analysis-drop {
+  height: 42px;
+  margin-top: 0;
+}
+
+.analysis-canvas-wrap {
+  position: relative;
+  min-height: 0;
+  border: 1px solid #303737;
+  background:
+    linear-gradient(45deg, rgba(255,255,255,.035) 25%, transparent 25% 75%, rgba(255,255,255,.035) 75%),
+    #050707;
+  background-size: 20px 20px;
+  overflow: hidden;
+  resize: both;
+}
+
+#analysis-preview-large,
+#analysis-spectrum,
+#analysis-histogram-large {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.analysis-overlay,
+#camera-large-status {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  padding: 4px 7px;
+  border: 1px solid rgba(89, 183, 255, .34);
+  background: rgba(5, 8, 9, .74);
+  color: #d4ebff;
+  font-size: 10px;
+  font-family: var(--mono);
+  pointer-events: none;
+}
+
+.analysis-plot-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, .9fr);
+  gap: 7px;
+}
+
+.mini-plot {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 22px minmax(0, 1fr);
+  border: 1px solid #303737;
+  background: #070a0a;
+  resize: both;
+  overflow: auto;
+}
+
+.plot-title {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 10px;
+  border-bottom: 1px solid #303737;
+  background: #111616;
+}
+
+.analysis-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.analysis-grid.large {
+  margin: 0 8px 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.camera-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #020303;
+  overflow: hidden;
+  resize: both;
+}
+
+#camera-feed-large {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #020303;
+}
+
+#camera-large-status.ok {
+  border-color: rgba(57, 210, 111, .34);
+  color: #9cf2b6;
+}
+
+#camera-large-status.warn {
+  border-color: rgba(242, 179, 75, .4);
+  color: #ffd177;
+}
+
+#camera-large-status.offline {
+  border-color: rgba(240, 91, 88, .38);
+  color: #ff9b98;
+}
+
+.camera-caption.large {
+  left: 10px;
+  bottom: 10px;
+  font-size: 11px;
+}
+
+.camera-health {
+  margin-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.diagnostic-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.diagnostic-error-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.diagnostic-error-list .error-row {
+  padding: 7px 8px;
+  margin-bottom: 5px;
+  border: 1px solid var(--line-soft);
+  background: #0b0f0f;
 }
 
 #overlay {
@@ -912,5 +1283,110 @@ input[type="range"] {
   .menu-bar,
   .toolbar {
     display: none;
+  }
+
+  .workspace-tabs {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .page-tab {
+    min-width: 64px;
+  }
+}
+
+@media (max-width: 900px) {
+  html,
+  body {
+    overflow: auto;
+    overflow-x: hidden;
+    height: auto;
+  }
+
+  #app {
+    min-height: 100vh;
+    height: auto;
+    overflow-x: hidden;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
+    grid-template-areas:
+      "header"
+      "center"
+      "right"
+      "left";
+  }
+
+  #header {
+    flex-wrap: wrap;
+    min-height: 76px;
+    height: auto;
+    padding: 7px 8px;
+    width: 100%;
+  }
+
+  .brand {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .status-strip {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    white-space: normal;
+  }
+
+  .mode-switch {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .danger-btn {
+    flex: 1 1 150px;
+  }
+
+  #left,
+  #right,
+  #center,
+  .workspace-page {
+    overflow: visible;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  #center {
+    grid-template-columns: 1fr;
+    grid-template-rows: 420px 260px auto;
+    grid-template-areas:
+      "cube"
+      "spectral"
+      "wave";
+  }
+
+  #toast-container {
+    right: 12px;
+  }
+
+  .workspace-page,
+  body[data-page="camera"] #camera-page {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  #analysis-page,
+  #camera-page,
+  #diagnostics-page {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+  }
+
+  .analysis-workbench {
+    grid-template-rows: auto 420px 240px;
+  }
+
+  .analysis-plot-grid,
+  .diagnostic-actions {
+    grid-template-columns: 1fr;
   }
 }

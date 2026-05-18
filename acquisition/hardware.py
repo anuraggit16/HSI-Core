@@ -15,6 +15,7 @@ from enum import Enum
 from typing import List, Optional, Dict, Tuple
 
 import config
+from acquisition.error_logger import log_error
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class HardwareDetector:
             )
         except Exception as e:
             logger.warning(f"Failed to detect Thorlabs stage {serial}: {e}")
+            log_error("STAGE_ERROR", RuntimeError(f"Failed to detect Thorlabs stage {serial}: {e}"))
             return None
     
     @staticmethod
@@ -94,6 +96,7 @@ class HardwareDetector:
                 )
         except Exception as e:
             logger.warning(f"Failed to detect Basler camera: {e}")
+            log_error("CAMERA_ERROR", RuntimeError(f"Failed to detect Basler camera: {e}"))
         
         return None
     
@@ -166,6 +169,7 @@ class HardwareMonitor:
             
             except Exception as e:
                 logger.error(f"Hardware monitor error: {e}")
+                log_error("SYSTEM_ERROR", e)
                 time.sleep(self.check_interval_s)
     
     def get_status(self) -> Dict[str, HardwareDevice]:

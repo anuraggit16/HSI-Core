@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from typing import Dict, List, Optional
 
@@ -96,12 +97,16 @@ class DataCubeManager:
             # Try to load metadata if it exists
             meta_path = os.path.join(path, "metadata.json")
             meta = {}
+            if name.lower() == "uploads" and not os.path.isfile(meta_path):
+                continue
             if os.path.isfile(meta_path):
-                with open(meta_path) as fh:
+                with open(meta_path, encoding="utf-8") as fh:
                     meta = json.load(fh)
+                if isinstance(meta.get("analysis"), dict):
+                    meta["analysis"].pop("png_base64", None)
             sessions.append({
                 "name"        : name,
-                "frame_count" : len(frames),
+                "frame_count" : int(meta.get("frames_acquired") or len(frames)),
                 "metadata"    : meta,
             })
         return sessions
@@ -127,11 +132,24 @@ class DataCubeManager:
 
         # Find matching file
         for fname in os.listdir(path):
-            if f"_y{yi:04d}_x{xi:04d}" in fname:
+            legacy_match = f"_y{yi:04d}_x{xi:04d}" in fname
+            modern_match = f"_img_{xi + 1:04d}_" in fname and yi == 0
+            if legacy_match or modern_match:
                 fpath = os.path.join(path, fname)
                 img   = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
                 if img is None:
                     return None
+                _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                return buf.tobytes()
+
+        fallback_files = [
+            f for f in os.listdir(path)
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff"))
+        ]
+        for fname in sorted(fallback_files):
+            fpath = os.path.join(path, fname)
+            img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+            if img is not None:
                 _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 return buf.tobytes()
         return None
@@ -150,6 +168,16 @@ class DataCubeManager:
         if not os.path.isdir(path):
             return None
 
+        preview_path = os.path.join(path, "preview.png")
+        if os.path.isfile(preview_path):
+            img = cv2.imread(preview_path, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                img = img.astype(np.float32)
+                mn, mx = img.min(), img.max()
+                if mx > mn:
+                    img = (img - mn) / (mx - mn)
+                return img
+
         scientific_frames = [
             f for f in os.listdir(path)
             if f.lower().endswith((".tif", ".tiff"))
@@ -165,9 +193,16 @@ class DataCubeManager:
         coords = []
         for f in frames:
             try:
-                parts = f.replace(".png", "").split("_")
-                yi = int(parts[-2][1:])   # yYYYY
-                xi = int(parts[-1][1:])   # xXXXX
+                legacy = re.search(r"_y(\d{4})_x(\d{4})", f)
+                modern = re.search(r"_img_(\d{4})_", f)
+                if legacy:
+                    yi = int(legacy.group(1))
+                    xi = int(legacy.group(2))
+                elif modern:
+                    yi = 0
+                    xi = int(modern.group(1)) - 1
+                else:
+                    continue
                 coords.append((yi, xi, f))
             except (IndexError, ValueError):
                 pass

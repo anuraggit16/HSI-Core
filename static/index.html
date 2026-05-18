@@ -23,11 +23,23 @@
                 <button class="icon-btn" title="Save session">S</button>
                 <button class="icon-btn" title="Export">E</button>
             </div>
+            <nav class="workspace-tabs" aria-label="Workspace pages">
+                <button class="page-tab active" data-page="overview">Overview</button>
+                <button class="page-tab" data-page="analysis">Analysis</button>
+                <button class="page-tab" data-page="camera">Camera</button>
+                <button class="page-tab" data-page="diagnostics">Diagnostics</button>
+            </nav>
+            <div class="mode-switch" aria-label="Control mode">
+                <button id="mode-live" class="mode-btn active" data-mode="LIVE">Live</button>
+                <button id="mode-scan" class="mode-btn" data-mode="SCAN">Scan</button>
+                <button id="mode-analysis" class="mode-btn" data-mode="ANALYSIS">Analysis</button>
+            </div>
             <div class="status-strip">
                 <span><i id="led-link" class="led off"></i><b id="link-label">Connecting</b></span>
                 <span><i id="led-camera" class="led off"></i><b id="camera-label">Camera --</b></span>
                 <span><i id="led-stage" class="led off"></i><b id="stage-label">Stage --</b></span>
                 <span><i id="led-mode" class="led warn"></i><b id="mode-label">Simulation</b></span>
+                <span><i id="led-errors" class="led ok"></i><b id="error-label">Errors 0</b></span>
                 <span id="clock">00:00:00</span>
             </div>
             <button id="btn-emergency" class="danger-btn">EMERGENCY STOP</button>
@@ -74,17 +86,17 @@
                     <div class="device-row"><span>Stage Position</span><b id="stage-x-pos">0.000 mm</b></div>
                     <div class="device-row"><span>Stage Status</span><b id="stage-y-pos">Idle</b></div>
                     <div class="device-row"><span>Camera</span><b id="camera-temp">-- C</b></div>
+                    <div class="device-row"><span>Spectral Range</span><b id="spectral-range">--</b></div>
+                    <div class="device-row"><span>Bands</span><b id="spectral-bands">--</b></div>
                     <div class="device-row"><span>Illumination</span><b id="illumination-state" class="ok">On</b></div>
                 </div>
             </section>
 
             <section class="panel processing">
-                <div class="panel-head">Processing Queue</div>
+                <div class="panel-head">System Errors</div>
                 <div class="panel-body">
                     <div id="queue-list" class="queue-list">
-                        <div class="queue-row"><span>Radiometric correction</span><b>Ready</b></div>
-                        <div class="queue-row"><span>Cube assembly</span><b>Idle</b></div>
-                        <div class="queue-row"><span>ROI extraction</span><b>Idle</b></div>
+                        <div class="queue-row error-row empty"><span>No errors recorded</span><b>OK</b></div>
                     </div>
                 </div>
             </section>
@@ -186,6 +198,13 @@
                     <label>End [mm]<input id="x-end" type="number" min="0" max="300" step="0.01" value="180"></label>
                     <label>Step [mm]<input id="x-step" type="number" min="0.01" max="10" step="0.01" value="1"></label>
                     <label>Settling [s]<input id="settling-s" type="number" min="0" max="30" step="0.05" value="0.1"></label>
+                    <label>Images<input id="image-count" type="number" min="1" max="100000" step="1" value="101"></label>
+                    <label>Auto Count
+                        <select id="auto-count">
+                            <option value="true">On</option>
+                            <option value="false">Off</option>
+                        </select>
+                    </label>
                 </div>
                 <label class="full-field">Scan Pattern
                     <select id="scan-pattern">
@@ -193,10 +212,19 @@
                         <option value="serpentine">Serpentine</option>
                     </select>
                 </label>
+                <div class="check-row">
+                    <label><input id="save-png" type="checkbox" checked> PNG</label>
+                    <label><input id="save-tiff" type="checkbox" checked> TIFF</label>
+                </div>
             </section>
 
             <section class="control-block">
                 <div class="sect-label">Spectral (Z/lambda) Scan</div>
+                <label class="toggle-row">
+                    <input id="live-processing" type="checkbox">
+                    <span>Live Processing</span>
+                    <b id="processing-state">OFF</b>
+                </label>
                 <div class="two-col">
                     <label>Min [nm]<input id="scan-wl-min" type="number" value="400"></label>
                     <label>Max [nm]<input id="scan-wl-max" type="number" value="1000"></label>
@@ -237,11 +265,12 @@
             </section>
 
             <section class="control-block upload-analysis">
-                <div class="sect-label">External Image Analysis</div>
+                <div class="sect-label">Analysis Mode</div>
                 <label class="file-drop" for="analysis-file">
                     <input id="analysis-file" type="file" accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff">
-                    <span id="analysis-file-name">Select image</span>
+                    <span id="analysis-file-name">Select TIFF or image</span>
                 </label>
+                <label class="full-field">Zoom<input id="analysis-zoom" type="range" min="1" max="5" step="0.1" value="1"></label>
                 <canvas id="analysis-preview"></canvas>
                 <div class="analysis-grid">
                     <span>Size <b id="analysis-size">--</b></span>
@@ -250,10 +279,129 @@
                     <span>Contrast <b id="analysis-contrast">--</b></span>
                     <span>Bright ROI <b id="analysis-roi">--</b></span>
                     <span>Color Bias <b id="analysis-bias">--</b></span>
+                    <span>Metadata <b id="analysis-meta">--</b></span>
                 </div>
                 <canvas id="analysis-histogram"></canvas>
             </section>
         </aside>
+
+        <main id="analysis-page" class="workspace-page">
+            <section class="panel analysis-main">
+                <div class="panel-head">
+                    <span>Hyperspectral Analysis</span>
+                    <span id="analysis-session-lg">No cube loaded</span>
+                </div>
+                <div class="analysis-workbench">
+                    <label class="file-drop analysis-drop" for="analysis-file-large">
+                        <input id="analysis-file-large" type="file" accept="image/*,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff">
+                        <span id="analysis-file-name-large">Select TIFF or image</span>
+                    </label>
+                    <div class="analysis-canvas-wrap">
+                        <canvas id="analysis-preview-large"></canvas>
+                        <div class="analysis-overlay" id="analysis-overlay-readout">Preview</div>
+                    </div>
+                    <div class="analysis-plot-grid">
+                        <div class="mini-plot">
+                            <div class="plot-title">Spectral Profile</div>
+                            <canvas id="analysis-spectrum"></canvas>
+                        </div>
+                        <div class="mini-plot">
+                            <div class="plot-title">Intensity Histogram</div>
+                            <canvas id="analysis-histogram-large"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <aside class="panel analysis-controls-panel">
+                <div class="panel-head">Analysis Controls</div>
+                <div class="panel-body analysis-controls">
+                    <label>Band<input id="analysis-band" type="range" min="1" max="1" step="1" value="1"></label>
+                    <label>Zoom<input id="analysis-zoom-large" type="range" min="1" max="5" step="0.1" value="1"></label>
+                    <label>Opacity<input id="analysis-opacity" type="range" min="0.2" max="1" step="0.05" value="1"></label>
+                    <label>Brightness<input id="analysis-brightness" type="range" min="0.5" max="2" step="0.05" value="1"></label>
+                    <label>Contrast<input id="analysis-contrast-ctrl" type="range" min="0.5" max="2.5" step="0.05" value="1"></label>
+                    <label>Gamma<input id="analysis-gamma" type="range" min="0.4" max="2.5" step="0.05" value="1"></label>
+                    <label>Palette
+                        <select id="analysis-palette">
+                            <option value="inferno">Inferno</option>
+                            <option value="viridis">Viridis</option>
+                            <option value="gray">Gray</option>
+                            <option value="thermal">Thermal</option>
+                        </select>
+                    </label>
+                    <button id="btn-reset-analysis" class="wide-btn">Reset View</button>
+                </div>
+                <div class="analysis-grid large">
+                    <span>Size <b data-analysis-field="size">--</b></span>
+                    <span>Bands <b data-analysis-field="bands">--</b></span>
+                    <span>Mean <b data-analysis-field="mean">--</b></span>
+                    <span>Peak <b data-analysis-field="peak">--</b></span>
+                    <span>Std <b data-analysis-field="std">--</b></span>
+                    <span>Range <b data-analysis-field="contrast">--</b></span>
+                    <span>SNR <b data-analysis-field="snr">--</b></span>
+                    <span>Preview <b data-analysis-field="preview">--</b></span>
+                    <span>Source <b data-analysis-field="metadata">--</b></span>
+                </div>
+            </aside>
+        </main>
+
+        <main id="camera-page" class="workspace-page">
+            <section class="panel camera-main">
+                <div class="panel-head">
+                    <span>Camera Monitor</span>
+                    <span id="camera-page-state">Waiting for stream</span>
+                </div>
+                <div class="camera-stage">
+                    <img id="camera-feed-large" src="/api/camera/stream" alt="Large live camera feed">
+                    <div id="camera-large-status">Camera signal</div>
+                    <div class="camera-caption large" id="camera-caption-large">Exposure 100 ms | Gain 0 dB</div>
+                </div>
+            </section>
+
+            <aside class="panel camera-controls-panel">
+                <div class="panel-head">Camera Setup</div>
+                <div class="panel-body">
+                    <div class="two-col">
+                        <label>Exposure [ms]<input id="camera-page-exposure" type="number" min="1" max="10000" value="100"></label>
+                        <label>Gain [dB]<input id="camera-page-gain" type="number" min="0" max="24" step="0.1" value="0"></label>
+                    </div>
+                    <button id="btn-apply-camera-large" class="wide-btn">Apply Camera</button>
+                    <button id="btn-detect-large" class="wide-btn">Detect Hardware</button>
+                    <div class="camera-health">
+                        <div class="device-row"><span>Stream</span><b id="camera-stream-health">--</b></div>
+                        <div class="device-row"><span>Temperature</span><b id="camera-temp-large">-- C</b></div>
+                        <div class="device-row"><span>Status</span><b id="camera-status-large">--</b></div>
+                        <div class="device-row"><span>Mode</span><b id="camera-mode-large">--</b></div>
+                    </div>
+                </div>
+            </aside>
+        </main>
+
+        <main id="diagnostics-page" class="workspace-page">
+            <section class="panel diagnostics-main">
+                <div class="panel-head">
+                    <span>Diagnostics</span>
+                    <span id="diagnostics-log-path">logs/system.log</span>
+                </div>
+                <div class="diagnostic-actions">
+                    <button id="btn-refresh-errors" class="wide-btn">Refresh Errors</button>
+                    <button id="btn-home-diagnostics" class="wide-btn">Home Stage</button>
+                    <button id="btn-detect-diagnostics" class="wide-btn">Detect Hardware</button>
+                </div>
+                <div id="diagnostics-errors" class="diagnostic-error-list"></div>
+            </section>
+            <aside class="panel diagnostics-status">
+                <div class="panel-head">System State</div>
+                <div class="panel-body">
+                    <div class="device-row"><span>Stage</span><b id="diag-stage">--</b></div>
+                    <div class="device-row"><span>Camera</span><b id="diag-camera">--</b></div>
+                    <div class="device-row"><span>Processing</span><b id="diag-processing">--</b></div>
+                    <div class="device-row"><span>Mode</span><b id="diag-mode">--</b></div>
+                    <div class="device-row"><span>Saved Errors</span><b id="diag-errors">0</b></div>
+                </div>
+            </aside>
+        </main>
     </div>
 
     <div id="overlay">
