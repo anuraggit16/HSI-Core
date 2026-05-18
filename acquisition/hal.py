@@ -209,128 +209,175 @@ class RealCamera:
 
 class LabController:
     """
-    Facade over stage(s) and camera. Use this class everywhere in the server —
-    never import Real/Mock classes directly.
+    Single-axis hyperspectral controller.
+    Spatial scan = X stage motion
+    Spectral scan = wavelength axis
     """
 
     def __init__(self):
+
         self._mock = config.MOCK_MODE
 
-        # -- Stages --------------------------------------------------------
-        if self._mock:
-            self.stage_x = MockStage("X")
-            self.stage_y = MockStage("Y")
-        else:
-            self.stage_x = MockStage("X")  # Replace with RealStage(serial="12345", channel=1)
-            self.stage_y = MockStage("Y")
-        # -- Camera --------------------------------------------------------
-        if self._mock:
-            self.camera = MockCamera()
-        else:
-            self.camera = MockCamera()
+        # ============================================================
+        # SINGLE STAGE
+        # ============================================================
 
-        # -- Live frame buffer (refreshed by background thread) -----------
-        self._live_frame: Optional[bytes] = None   # JPEG bytes
+        if self._mock:
+            self.stage = MockStage("X")
+        else:
+            self.stage = RealStage(
+                config.CONTROLLER_SERIAL_X,
+                channel=1
+            )
+
+        # ============================================================
+        # CAMERA
+        # ============================================================
+
+        if self._mock:
+            self.camera = MockCamera()
+        else:
+            self.camera = RealCamera()
+
+        # ============================================================
+        # LIVE STREAM THREAD
+        # ============================================================
+
+        self._live_frame = None
         self._frame_lock = threading.Lock()
-        self._running    = True
+
+        self._running = True
+
         self._cam_thread = threading.Thread(
-            target=self._camera_loop, daemon=True
+            target=self._camera_loop,
+            daemon=True
         )
+
         self._cam_thread.start()
 
-    # ------------------------------------------------------------------
-    # BACKGROUND FRAME ACQUISITION THREAD
-    # ------------------------------------------------------------------
+    # ================================================================
+    # CAMERA LOOP
+    # ================================================================
 
     def _camera_loop(self):
+
         import cv2
+
         while self._running:
+
             try:
-                raw  = self.camera.grab_frame()
+
+                raw = self.camera.grab_frame()
+
                 _, buf = cv2.imencode(
-                    ".jpg", raw,
+                    ".jpg",
+                    raw,
                     [cv2.IMWRITE_JPEG_QUALITY, 80]
                 )
+
                 with self._frame_lock:
                     self._live_frame = buf.tobytes()
-            except Exception:
-                pass
-            time.sleep(0.05)   # ~20 fps
 
-    def get_live_jpeg(self) -> Optional[bytes]:
+            except Exception as e:
+                print("Camera loop error:", e)
+
+            time.sleep(0.05)
+
+    def get_live_jpeg(self):
+
         with self._frame_lock:
             return self._live_frame
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # CAMERA CONTROL
-    # ------------------------------------------------------------------
+    # ================================================================
 
     def set_camera_exposure(self, us: float):
+
         self.camera.set_exposure(us)
 
     def set_camera_gain(self, db: float):
+
         self.camera.set_gain(db)
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # STAGE CONTROL
-    # ------------------------------------------------------------------
+    # ================================================================
 
-    def jog(self, axis: str, direction: int, step_mm: float):
-        """Relative move. axis='x'|'y', direction=+1|-1"""
-        if axis.lower() == "x":
-            target = self.stage_x.position_mm + direction * step_mm
-            target = max(config.STAGE_X_MIN_MM,
-                         min(config.STAGE_X_MAX_MM, target))
-            self.stage_x.move_to(target)
-        else:
-            target = self.stage_y.position_mm + direction * step_mm
-            target = max(config.STAGE_Y_MIN_MM,
-                         min(config.STAGE_Y_MAX_MM, target))
-            self.stage_y.move_to(target)
+    def jog(self, direction: int, step_mm: float):
 
-    def goto(self, x_mm: float, y_mm: float):
-        x_mm = max(config.STAGE_X_MIN_MM, min(config.STAGE_X_MAX_MM, x_mm))
-        y_mm = max(config.STAGE_Y_MIN_MM, min(config.STAGE_Y_MAX_MM, y_mm))
-        self.stage_x.move_to(x_mm)
-        self.stage_x.wait_move()
-        self.stage_y.move_to(y_mm)
-        self.stage_y.wait_move()
+        target = (
+            self.stage.position_mm
+            + direction * step_mm
+        )
+
+        target = max(
+            config.STAGE_X_MIN_MM,
+            min(config.STAGE_X_MAX_MM, target)
+        )
+
+        self.stage.move_to(target)
+
+    def goto(self, x_mm: float):
+
+        x_mm = max(
+            config.STAGE_X_MIN_MM,
+            min(config.STAGE_X_MAX_MM, x_mm)
+        )
+
+        self.stage.move_to(x_mm)
+
+        self.stage.wait_move()
 
     def home(self):
-        self.stage_x.home()
-        self.stage_x.wait_move()
-        self.stage_y.home()
-        self.stage_y.wait_move()
 
-    # ------------------------------------------------------------------
+        self.stage.home()
+
+        self.stage.wait_move()
+
+    # ================================================================
     # STATUS
-    # ------------------------------------------------------------------
+    # ================================================================
 
-    def status_dict(self) -> dict:
+    def status_dict(self):
+
         with self._frame_lock:
-            camera_connected = self._live_frame is not None
-        stage_x_moving = bool(getattr(self.stage_x, "is_moving", False))
-        stage_y_moving = bool(getattr(self.stage_y, "is_moving", False))
+            camera_connected = (
+                self._live_frame is not None
+            )
+
         return {
-            "mock_mode"    : self._mock,
-            "stage_x_mm"  : round(self.stage_x.position_mm, 4),
-            "stage_y_mm"  : round(self.stage_y.position_mm, 4),
+
+            "mock_mode": self._mock,
+
+            "stage_mm": round(
+                self.stage.position_mm,
+                4
+            ),
+
             "stage_connected": True,
-            "stage_x_moving": stage_x_moving,
-            "stage_y_moving": stage_y_moving,
-            "camera_temp" : self.camera.temperature,
+
+            "stage_moving": bool(
+                getattr(self.stage, "is_moving", False)
+            ),
+
+            "camera_temp": self.camera.temperature,
+
             "camera_connected": bool(camera_connected),
-            "lens_focus"  : -600,      # ppm — from config if encoder available
+
             "illumination": True,
-            "connected"   : True,
+
+            "connected": True,
         }
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # CLEANUP
-    # ------------------------------------------------------------------
+    # ================================================================
 
     def close(self):
+
         self._running = False
-        self.stage_x.close()
-        self.stage_y.close()
+
+        self.stage.close()
+
         self.camera.close()
