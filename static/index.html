@@ -71,8 +71,8 @@
             <section class="panel hardware">
                 <div class="panel-head">Hardware</div>
                 <div class="panel-body">
-                    <div class="device-row"><span>X Stage</span><b id="stage-x-pos">0.000 mm</b></div>
-                    <div class="device-row"><span>Y Stage</span><b id="stage-y-pos">0.000 mm</b></div>
+                    <div class="device-row"><span>Stage Position</span><b id="stage-x-pos">0.000 mm</b></div>
+                    <div class="device-row"><span>Stage Status</span><b id="stage-y-pos">Idle</b></div>
                     <div class="device-row"><span>Camera</span><b id="camera-temp">-- C</b></div>
                     <div class="device-row"><span>Illumination</span><b id="illumination-state" class="ok">On</b></div>
                 </div>
@@ -160,6 +160,7 @@
                 </div>
                 <div class="progress-line">
                     <span id="scan-state">IDLE</span>
+                    <span id="scan-counter">0/0</span>
                     <span id="scan-eta">ETA --</span>
                 </div>
                 <div class="progress-bar"><div id="scan-progress"></div></div>
@@ -167,29 +168,29 @@
 
             <section class="control-block">
                 <div class="sect-label">Stage Control</div>
-                <div class="jog-pad">
-                    <button data-jog="y:+1">Y+</button>
-                    <button data-jog="x:-1">X-</button>
+                <div class="stage-control-grid">
+                    <button data-jog="x:-1">Left</button>
                     <input id="jog-step" type="number" min="0.01" max="25" step="0.01" value="1.00">
-                    <button data-jog="x:+1">X+</button>
-                    <button data-jog="y:-1">Y-</button>
+                    <button data-jog="x:+1">Right</button>
+                    <input id="goto-x" type="number" min="0" max="300" step="0.01" value="0.00">
+                    <button id="btn-goto" class="wide-btn">Go To</button>
                 </div>
-                <div id="stage-motion" class="stage-motion">Stage idle | X 0.000 mm | Y 0.000 mm</div>
+                <div id="stage-motion" class="stage-motion">Stage idle | X 0.000 mm</div>
             </section>
 
             <section class="control-block">
-                <div class="sect-label">Spatial (X,Y) Scan</div>
+                <div class="sect-label">Auto Scan</div>
                 <canvas id="scan-map"></canvas>
                 <div class="two-col">
-                    <label>X Range [mm]<input id="x-range" type="number" min="0.1" max="300" step="0.1" value="100"></label>
-                    <label>Y Range [mm]<input id="y-range" type="number" min="0.1" max="300" step="0.1" value="20"></label>
-                    <label>X Step [mm]<input id="x-step" type="number" min="0.01" max="10" step="0.01" value="1"></label>
-                    <label>Y Step [mm]<input id="y-step" type="number" min="0.01" max="10" step="0.01" value="1"></label>
+                    <label>Start [mm]<input id="x-start" type="number" min="0" max="300" step="0.01" value="80"></label>
+                    <label>End [mm]<input id="x-end" type="number" min="0" max="300" step="0.01" value="180"></label>
+                    <label>Step [mm]<input id="x-step" type="number" min="0.01" max="10" step="0.01" value="1"></label>
+                    <label>Settling [s]<input id="settling-s" type="number" min="0" max="30" step="0.05" value="0.1"></label>
                 </div>
-                <label class="full-field">Raster Pattern
+                <label class="full-field">Scan Pattern
                     <select id="scan-pattern">
+                        <option value="raster">Raster</option>
                         <option value="serpentine">Serpentine</option>
-                        <option value="grid">Raster Grid</option>
                     </select>
                 </label>
             </section>

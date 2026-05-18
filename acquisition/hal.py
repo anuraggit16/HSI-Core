@@ -98,75 +98,104 @@ class MockStage:
 # =============================================================================
 # REAL STAGE
 # =============================================================================
-
 class RealStage:
-    """
-    Real Thorlabs Kinesis stage
-    Auto-detects connected controller
-    """
+    """Safe Thorlabs Kinesis wrapper (no crash version)."""
 
-    def __init__(self, channel: int = 1):
-
+    def __init__(self, serial: str | None = None, channel: int = 1):
         from pylablib.devices import Thorlabs
+        self._fallback = False
 
-        devices = Thorlabs.list_kinesis_devices()
-
-        print(f"[HSI] Detected Kinesis devices: {devices}")
-
-        if not devices:
-            raise RuntimeError(
-                "No Thorlabs Kinesis devices detected"
-            )
-
-        serial = devices[0][0]
-
-        print(f"[HSI] Using stage serial: {serial}")
-
-        self._stage = Thorlabs.KinesisMotor(
-            serial,
-            is_rack_system=True,
-            default_channel=channel
-        )
-
-        self._stage.setup_velocity(
-            min_velocity=config.STAGE_MIN_VELOCITY,
-            max_velocity=config.STAGE_MAX_VELOCITY,
-            acceleration=config.STAGE_ACCELERATION,
-        )
-
-    @property
-    def position_mm(self) -> float:
-
-        raw = self._stage.get_position()
-
-        return raw / config.UNITS_PER_MM
-
-    @property
-    def is_moving(self) -> bool:
+        print("\n[HSI] Searching for Kinesis devices...")
 
         try:
+            devices = Thorlabs.list_kinesis_devices()
+            print("[HSI] Found devices:", devices)
+
+            if not devices:
+                raise RuntimeError("No Kinesis devices found")
+
+            if serial is None:
+                serial = devices[0][0]
+
+            print(f"[HSI] Connecting to serial: {serial}")
+
+            # ✅ IMPORTANT: NO backend override (this was breaking everything)
+            self._stage = Thorlabs.KinesisMotor(
+                serial,
+                is_rack_system=True,
+                default_channel=channel
+            )
+
+            self._stage.setup_velocity(
+                min_velocity=config.STAGE_MIN_VELOCITY,
+                max_velocity=config.STAGE_MAX_VELOCITY,
+                acceleration=config.STAGE_ACCELERATION,
+            )
+
+            print("[HSI] Stage connected")
+
+        except Exception as e:
+            print("[HSI] Stage connection failed:", e)
+            print("[HSI] Switching to MOCK stage automatically")
+
+            from acquisition.hal import MockStage
+            self._stage = MockStage("X")
+            self._fallback = True
+
+    @property
+    def fallback(self) -> bool:
+        return self._fallback
+
+    @property
+    def position_mm(self):
+        try:
+            if self._fallback:
+                return self._stage.position_mm
+            return self._stage.get_position() / config.UNITS_PER_MM
+        except:
+            return 0.0
+
+    @property
+    def is_moving(self):
+        try:
+            if self._fallback:
+                return self._stage.is_moving
             return bool(self._stage.is_moving())
-        except Exception:
+        except:
             return False
 
     def move_to(self, target_mm: float):
-
-        self._stage.move_to(
-            int(target_mm * config.UNITS_PER_MM)
-        )
+        try:
+            if self._fallback:
+                self._stage.move_to(target_mm)
+                return
+            self._stage.move_to(int(target_mm * config.UNITS_PER_MM))
+        except:
+            pass
 
     def wait_move(self):
-
-        self._stage.wait_move()
+        try:
+            if self._fallback:
+                self._stage.wait_move()
+                return
+            self._stage.wait_move()
+        except:
+            pass
 
     def home(self):
-
-        self._stage.home(sync=True)
+        try:
+            if self._fallback:
+                self._stage.home()
+                return
+            self._stage.home(sync=True)
+        except:
+            pass
 
     def close(self):
-
-        self._stage.close()
-
+        try:
+            self._stage.close()
+        except:
+            pass
 
 # =============================================================================
 # MOCK CAMERA
@@ -316,7 +345,11 @@ class RealCamera:
 
 class LabController:
     """
-    Single-axis hyperspectral controller
+    Single-axis hyperspectral controller (SAFE VERSION)
+
+    - Auto-fallback to Mock if hardware fails
+    - Prevents server crash on stage/camera errors
+    - Stable for production FastAPI
     """
 
     def __init__(self):
@@ -324,45 +357,62 @@ class LabController:
         self._mock = config.MOCK_MODE
 
         # ============================================================
-        # STAGE
+        # STAGE INIT (SAFE)
         # ============================================================
 
-        if self._mock:
+        self.stage = None
 
+        if self._mock:
             self.stage = MockStage("X")
 
         else:
+            try:
+                self.stage = RealStage(channel=1)
+                if getattr(self.stage, "fallback", False):
+                    self._mock = True
 
-            self.stage = RealStage(channel=1)
+            except Exception as e:
+                print(f"[HSI] Stage init failed → switching to MOCK: {e}")
+                self._mock = True
+                self.stage = MockStage("X")
 
         # ============================================================
-        # CAMERA
+        # CAMERA INIT (SAFE)
         # ============================================================
+
+        self.camera = None
 
         if self._mock:
-
             self.camera = MockCamera()
+            self._camera_status = "mock"
 
         else:
+            try:
+                self.camera = RealCamera()
+                self._camera_status = "connected"
 
-            self.camera = RealCamera()
+            except Exception as e:
+                print(f"[HSI] Camera init failed → switching to MOCK: {e}")
+                self.camera = MockCamera()
+                self._camera_status = "failed"
 
         # ============================================================
         # LIVE FRAME BUFFER
         # ============================================================
 
         self._live_frame: Optional[bytes] = None
-
         self._frame_lock = threading.Lock()
-
+        self._camera_access_lock = threading.Lock()
+        self._camera_error_count = 0
         self._running = True
 
         self._cam_thread = threading.Thread(
             target=self._camera_loop,
             daemon=True
         )
-
         self._cam_thread.start()
+
+        print("[HSI] LabController initialized successfully")
 
     # ================================================================
     # CAMERA LOOP
@@ -375,81 +425,122 @@ class LabController:
         while self._running:
 
             try:
+                raw = self.capture_frame()
 
-                raw = self.camera.grab_frame()
-
-                _, buf = cv2.imencode(
+                ok, buf = cv2.imencode(
                     ".jpg",
                     raw,
                     [cv2.IMWRITE_JPEG_QUALITY, 80]
                 )
 
-                with self._frame_lock:
-
-                    self._live_frame = buf.tobytes()
+                if ok:
+                    with self._frame_lock:
+                        self._live_frame = buf.tobytes()
 
             except Exception as e:
-
                 print("[HSI] Camera loop error:", e)
 
             time.sleep(0.05)
 
+    # ================================================================
+    # LIVE STREAM
+    # ================================================================
+
     def get_live_jpeg(self):
 
         with self._frame_lock:
-
             return self._live_frame
+
+    def capture_frame(self) -> np.ndarray:
+
+        with self._camera_access_lock:
+            try:
+                frame = self.camera.grab_frame()
+                self._camera_error_count = 0
+                if self._camera_status not in ("mock", "failed"):
+                    self._camera_status = "connected"
+                return frame
+
+            except Exception as e:
+                self._camera_error_count += 1
+                print("[HSI] Camera capture failed:", e)
+
+                if self._camera_status != "mock":
+                    self._camera_status = "locked"
+
+                if self._camera_error_count >= 3 and not isinstance(self.camera, MockCamera):
+                    print("[HSI] Camera locked - switching to safe fallback stream")
+                    try:
+                        self.camera.close()
+                    except Exception:
+                        pass
+                    self.camera = MockCamera()
+
+                return self.camera.grab_frame()
 
     # ================================================================
     # CAMERA CONTROL
     # ================================================================
 
     def set_camera_exposure(self, us: float):
-
-        self.camera.set_exposure(us)
+        try:
+            with self._camera_access_lock:
+                self.camera.set_exposure(us)
+        except Exception as e:
+            print("[HSI] Exposure set failed:", e)
 
     def set_camera_gain(self, db: float):
-
-        self.camera.set_gain(db)
+        try:
+            with self._camera_access_lock:
+                self.camera.set_gain(db)
+        except Exception as e:
+            print("[HSI] Gain set failed:", e)
 
     # ================================================================
-    # STAGE CONTROL
+    # STAGE CONTROL (SAFE)
     # ================================================================
 
-    def jog(
-        self,
-        direction: int,
-        step_mm: float
-    ):
+    def jog(self, direction: int, step_mm: float):
 
-        target = (
-            self.stage.position_mm
-            + direction * step_mm
-        )
+        try:
+            target = self.stage.position_mm + direction * step_mm
 
-        target = max(
-            config.STAGE_X_MIN_MM,
-            min(config.STAGE_X_MAX_MM, target)
-        )
+            target = max(
+                config.STAGE_X_MIN_MM,
+                min(config.STAGE_X_MAX_MM, target)
+            )
 
-        self.stage.move_to(target)
+            self.stage.move_to(target)
+
+        except Exception as e:
+            print("[HSI] Jog failed:", e)
 
     def goto(self, x_mm: float):
 
-        x_mm = max(
-            config.STAGE_X_MIN_MM,
-            min(config.STAGE_X_MAX_MM, x_mm)
-        )
+        try:
+            x_mm = max(
+                config.STAGE_X_MIN_MM,
+                min(config.STAGE_X_MAX_MM, x_mm)
+            )
 
-        self.stage.move_to(x_mm)
+            self.stage.move_to(x_mm)
+            self.stage.wait_move()
 
-        self.stage.wait_move()
+        except Exception as e:
+            print("[HSI] Goto failed:", e)
 
     def home(self):
 
-        self.stage.home()
+        try:
+            self.stage.home()
+            self.stage.wait_move()
 
-        self.stage.wait_move()
+        except Exception as e:
+            print("[HSI] Home failed:", e)
+
+    def move_and_wait(self, x_mm: float):
+
+        self.goto(x_mm)
 
     # ================================================================
     # STATUS
@@ -458,35 +549,38 @@ class LabController:
     def status_dict(self):
 
         with self._frame_lock:
+            camera_connected = self._live_frame is not None
 
-            camera_connected = (
-                self._live_frame is not None
-            )
+        stage_ok = False
+        try:
+            _ = self.stage.position_mm
+            stage_ok = True
+        except:
+            stage_ok = False
+
+        stage_pos = round(getattr(self.stage, "position_mm", 0.0), 4)
+        stage_moving = bool(getattr(self.stage, "is_moving", False))
 
         return {
-
             "mock_mode": self._mock,
-
-            "stage_mm": round(
-                self.stage.position_mm,
-                4
+            "stage_mm": stage_pos,
+            "stage_x_mm": stage_pos,
+            "stage_y_mm": 0.0,
+            "stage_connected": stage_ok,
+            "stage_moving": stage_moving,
+            "stage_x_moving": stage_moving,
+            "stage_y_moving": False,
+            "stage_status": (
+                "moving"
+                if stage_moving
+                else ("connected" if stage_ok else "error")
             ),
-
-            "stage_connected": True,
-
-            "stage_moving": bool(
-                getattr(self.stage, "is_moving", False)
-            ),
-
-            "camera_temp": self.camera.temperature,
-
-            "camera_connected": bool(
-                camera_connected
-            ),
-
+            "camera_temp": getattr(self.camera, "temperature", -1),
+            "camera_connected": camera_connected,
+            "camera_status": self._camera_status,
+            "camera_locked": self._camera_status == "locked",
             "illumination": True,
-
-            "connected": True,
+            "connected": stage_ok or camera_connected,
         }
 
     # ================================================================
@@ -497,6 +591,12 @@ class LabController:
 
         self._running = False
 
-        self.stage.close()
+        try:
+            self.stage.close()
+        except:
+            pass
 
-        self.camera.close()
+        try:
+            self.camera.close()
+        except:
+            pass

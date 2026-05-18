@@ -608,7 +608,8 @@ input[type="range"] {
 
 .control-btn,
 .wide-btn,
-.jog-pad button {
+.jog-pad button,
+.stage-control-grid button {
   height: 27px;
   border: 1px solid #3c4545;
   border-radius: 4px;
@@ -622,7 +623,8 @@ input[type="range"] {
 .control-btn.stop { border-color: #833937; background: #321717; color: #ff8a87; }
 .control-btn.secondary,
 .wide-btn,
-.jog-pad button { color: #d2e7f8; }
+.jog-pad button,
+.stage-control-grid button { color: #d2e7f8; }
 .control-btn:disabled { opacity: .42; cursor: not-allowed; }
 
 .progress-line {
@@ -668,12 +670,23 @@ input[type="range"] {
   gap: 5px;
 }
 
+.stage-control-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 86px minmax(0, 1fr);
+  gap: 5px;
+}
+
+.stage-control-grid #goto-x {
+  grid-column: span 2;
+}
+
 .jog-pad button:first-child,
 .jog-pad button:last-child {
   grid-column: 2;
 }
 
-.jog-pad button.moving {
+.jog-pad button.moving,
+.stage-control-grid button.moving {
   border-color: #a87324;
   background: #392912;
   color: #ffd98a;

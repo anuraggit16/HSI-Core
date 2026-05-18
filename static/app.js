@@ -84,6 +84,7 @@ function bindControls() {
   $("btn-stop").addEventListener("click", () => postJson("/api/scan/stop"));
   $("btn-emergency").addEventListener("click", emergencyStop);
   $("btn-home").addEventListener("click", () => postJson("/api/stage/home").then(() => toast("Homing stage", "info")));
+  $("btn-goto").addEventListener("click", gotoStage);
   $("btn-detect").addEventListener("click", detectHardware);
   $("btn-capture").addEventListener("click", () => toast("Live frame held in acquisition buffer", "info"));
   $("btn-apply-camera").addEventListener("click", applyCameraSettings);
@@ -99,7 +100,7 @@ function bindControls() {
     $(id).addEventListener("input", updateWavelengthReadout);
   });
 
-  ["x-range", "y-range", "x-step", "y-step", "scan-pattern"].forEach((id) => {
+  ["x-start", "x-end", "x-step", "settling-s", "scan-pattern"].forEach((id) => {
     $(id).addEventListener("input", drawScanMap);
   });
 
@@ -209,9 +210,12 @@ async function refreshStatus() {
 function updateTelemetry(data) {
   if (data.hardware) {
     const hw = data.hardware;
+    const xPos = Number(hw.stage_x_mm ?? hw.stage_mm ?? 0);
+    const stageMoving = Boolean(hw.stage_x_moving ?? hw.stage_moving);
+    const stageStatus = hw.stage_status || (stageMoving ? "moving" : "idle");
     state.mockMode = Boolean(hw.mock_mode);
-    $("stage-x-pos").textContent = `${Number(hw.stage_x_mm || 0).toFixed(3)} mm`;
-    $("stage-y-pos").textContent = `${Number(hw.stage_y_mm || 0).toFixed(3)} mm`;
+    $("stage-x-pos").textContent = `${xPos.toFixed(3)} mm`;
+    $("stage-y-pos").textContent = stageStatus;
     $("camera-temp").textContent = `${Number(hw.camera_temp || 0).toFixed(1)} C`;
     $("temp-readout").textContent = `${Number(hw.camera_temp || 0).toFixed(1)} C`;
     $("focus-readout").textContent = `${hw.lens_focus ?? "--"} ppm`;
@@ -251,8 +255,9 @@ function updateScanUi() {
   const s = state.scan;
   $("scan-state").textContent = s.state;
   $("scan-eta").textContent = `ETA ${s.eta || "--"}s`;
+  $("scan-counter").textContent = `${s.framesDone || 0}/${s.totalFrames || 0}`;
   $("scan-progress").style.width = `${clamp(s.percent, 0, 100)}%`;
-  $("cube-readout").textContent = s.nx && s.ny ? `${s.nx} x ${s.ny} scan | ${s.framesDone}/${s.totalFrames}` : "X/Y/lambda volume";
+  $("cube-readout").textContent = s.nx ? `${s.nx} position scan | ${s.framesDone}/${s.totalFrames}` : "X/lambda volume";
 
   const idle = s.state === "IDLE" || s.state === "ScanState.IDLE";
   const running = s.state === "RUNNING" || s.state === "ScanState.RUNNING";
@@ -280,20 +285,17 @@ function handleEvent(event) {
 }
 
 async function startScan() {
-  const xRange = Number($("x-range").value);
-  const yRange = Number($("y-range").value);
+  const xStart = Number($("x-start").value);
+  const xEnd = Number($("x-end").value);
   const xStep = Number($("x-step").value);
-  const yStep = Number($("y-step").value);
   const payload = {
-    x_start: 80,
-    x_end: 80 + xRange,
+    x_start: xStart,
+    x_end: xEnd,
     x_step: xStep,
-    y_start: 80,
-    y_end: 80 + yRange,
-    y_step: yStep,
     exposure_ms: Number($("exposure-ms").value),
-    settling_s: 0.1,
+    settling_s: Number($("settling-s").value),
     raster: $("scan-pattern").value,
+    scan_pattern: $("scan-pattern").value,
     session_name: $("session-name").value,
     wavelength_min_nm: Number($("scan-wl-min").value),
     wavelength_max_nm: Number($("scan-wl-max").value),
@@ -331,6 +333,18 @@ async function jog(axis, direction) {
   }
 }
 
+async function gotoStage() {
+  const x = Number($("goto-x").value);
+  markStageMoving("x", x >= state.stage.x ? 1 : -1, Math.abs(x - state.stage.x));
+  try {
+    await postJson("/api/stage/goto", { x_mm: x });
+    toast(`Moving stage to ${x.toFixed(3)} mm`, "info");
+  } catch (error) {
+    clearStageMoving();
+    toast(error.message || "Stage move rejected", "error");
+  }
+}
+
 function markStageMoving(axis, direction, step) {
   const label = `${axis.toUpperCase()}${direction > 0 ? "+" : "-"}`;
   state.stage.movingUntil = Date.now() + Math.max(900, step * 420);
@@ -351,6 +365,15 @@ function clearStageMoving() {
 
 function updateCameraConnection(hw) {
   const cameraConnected = hw.camera_connected !== false;
+  const cameraStatus = String(hw.camera_status || (cameraConnected ? "connected" : "failed"));
+  if (cameraStatus === "locked" || cameraStatus === "failed") {
+    $("camera-label").textContent = cameraStatus === "locked" ? "Camera Locked" : "Camera Failed";
+    $("led-camera").className = "led warn";
+    $("camera-feed-status").textContent = cameraStatus === "locked" ? "Fallback stream" : "Safe fallback";
+    $("camera-feed-status").className = "offline";
+    return;
+  }
+
   if (hw.mock_mode) {
     $("camera-label").textContent = "Camera Simulated";
     $("led-camera").className = "led warn";
@@ -374,11 +397,11 @@ function updateJogButtonHighlight(label) {
 }
 
 function updateStageConnection(hw) {
-  const x = Number(hw.stage_x_mm || 0);
-  const y = Number(hw.stage_y_mm || 0);
+  const x = Number(hw.stage_x_mm ?? hw.stage_mm ?? 0);
+  const y = 0;
   const stageConnected = hw.stage_connected !== false && hw.connected !== false;
-  const backendMoving = Boolean(hw.stage_x_moving || hw.stage_y_moving);
-  const positionChanged = Math.abs(x - state.stage.x) > 0.0005 || Math.abs(y - state.stage.y) > 0.0005;
+  const backendMoving = Boolean(hw.stage_x_moving ?? hw.stage_moving);
+  const positionChanged = Math.abs(x - state.stage.x) > 0.0005;
   const moving = stageConnected && (backendMoving || positionChanged || Date.now() < state.stage.movingUntil);
   state.stage.x = x;
   state.stage.y = y;
@@ -386,7 +409,7 @@ function updateStageConnection(hw) {
   if (hw.mock_mode && !moving) {
     $("stage-label").textContent = "Stage Simulated";
     $("led-stage").className = "led warn";
-    $("stage-motion").textContent = `Simulated stage | X ${x.toFixed(3)} mm | Y ${y.toFixed(3)} mm`;
+    $("stage-motion").textContent = `Simulated stage | X ${x.toFixed(3)} mm`;
     $("stage-motion").classList.remove("moving");
     state.stage.activeJog = "";
     updateJogButtonHighlight("");
@@ -406,12 +429,12 @@ function updateStageConnection(hw) {
     const active = state.stage.activeJog ? ` ${state.stage.activeJog}` : "";
     $("stage-label").textContent = hw.mock_mode ? `Stage Sim Moving${active}` : `Stage Moving${active}`;
     $("led-stage").className = "led warn";
-    $("stage-motion").textContent = `${hw.mock_mode ? "Sim moving" : "Moving"}${active} | X ${x.toFixed(3)} mm | Y ${y.toFixed(3)} mm`;
+    $("stage-motion").textContent = `${hw.mock_mode ? "Sim moving" : "Moving"}${active} | X ${x.toFixed(3)} mm`;
     $("stage-motion").classList.add("moving");
   } else {
     $("stage-label").textContent = "Stage Connected";
     $("led-stage").className = "led ok";
-    $("stage-motion").textContent = `Stage idle | X ${x.toFixed(3)} mm | Y ${y.toFixed(3)} mm`;
+    $("stage-motion").textContent = `Stage idle | X ${x.toFixed(3)} mm`;
     $("stage-motion").classList.remove("moving");
     state.stage.activeJog = "";
     updateJogButtonHighlight("");
@@ -886,8 +909,11 @@ function drawScanMap() {
   const h = canvas.height;
   drawGrid(ctx, w, h, 8, 6);
 
-  const nx = state.scan.nx || Math.max(2, Math.round(Number($("x-range").value) / Number($("x-step").value)) + 1);
-  const ny = state.scan.ny || Math.max(2, Math.round(Number($("y-range").value) / Number($("y-step").value)) + 1);
+  const xStart = Number($("x-start").value);
+  const xEnd = Number($("x-end").value);
+  const xStep = Math.max(0.0001, Number($("x-step").value));
+  const nx = state.scan.nx || Math.max(2, Math.round(Math.abs(xEnd - xStart) / xStep) + 1);
+  const ny = state.scan.ny || 1;
   const values = state.heatmap.length === nx * ny ? state.heatmap : null;
   const max = values ? Math.max(1, ...values) : 1;
   const cellW = w / nx;

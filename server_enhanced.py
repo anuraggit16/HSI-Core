@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 import time
 from typing import Optional, Set
 
@@ -88,6 +89,11 @@ def _normalise_save_folder(value: str) -> str:
     return folder
 
 
+def _system_mode(status: dict) -> str:
+
+    return "mock" if status.get("mock_mode") else "real"
+
+
 # =============================================================================
 # STARTUP / SHUTDOWN
 # =============================================================================
@@ -128,15 +134,34 @@ async def serve_ui():
 @app.get("/api/status")
 async def get_status():
 
+    hardware = controller.status_dict()
+    scan = scan_engine.progress_dict()
+
     return {
 
-        "hardware": controller.status_dict(),
+        "hardware": hardware,
 
-        "scan": scan_engine.progress_dict(),
+        "scan": scan,
+
+        "system": {
+
+            "mode": _system_mode(hardware),
+
+            "ready": bool(
+                hardware.get("stage_connected")
+                and hardware.get("camera_connected")
+            ),
+
+            "stage_position_mm": hardware.get("stage_mm"),
+
+            "camera_state": hardware.get("camera_status"),
+
+            "scan_state": scan.get("state"),
+        },
 
         "config": {
 
-            "mock_mode": config.MOCK_MODE,
+            "mock_mode": hardware.get("mock_mode"),
 
             "stage_limits_mm": {
 
@@ -190,6 +215,35 @@ async def set_storage(req: StorageRequest):
     }
 
 
+@app.post("/api/storage/browse")
+async def browse_storage(req: StorageRequest):
+
+    folder = _normalise_save_folder(
+        req.current_folder or config.SAVE_FOLDER
+    )
+
+    return {
+        "ok": True,
+        "save_folder": folder,
+    }
+
+
+@app.post("/api/storage/open")
+async def open_storage(req: StorageRequest):
+
+    folder = _normalise_save_folder(
+        req.save_folder or config.SAVE_FOLDER
+    )
+
+    if sys.platform.startswith("win"):
+        os.startfile(folder)  # type: ignore[attr-defined]
+
+    return {
+        "ok": True,
+        "save_folder": folder,
+    }
+
+
 # =============================================================================
 # HARDWARE
 # =============================================================================
@@ -234,6 +288,29 @@ async def hardware_status():
 
             "temperature_c": status["camera_temp"],
         },
+    }
+
+
+@app.post("/api/hardware/detect")
+async def hardware_detect():
+
+    detected = HardwareDetector.detect_all()
+    status = controller.status_dict()
+
+    return {
+        "ok": True,
+        "detected": {
+            name: {
+                "type": device.type,
+                "name": device.name,
+                "serial": device.serial,
+                "connected": device.connected,
+                "model": device.model,
+                "status": device.status,
+            }
+            for name, device in detected.items()
+        },
+        "hardware": status,
     }
 
 
@@ -398,9 +475,19 @@ class ScanStartRequest(BaseModel):
 
     x_step: float = config.SCAN_STEP_X_MM
 
+    start_position_mm: Optional[float] = None
+
+    end_position_mm: Optional[float] = None
+
+    step_size_mm: Optional[float] = None
+
     exposure_ms: float = config.EXPOSURE_MS
 
     settling_s: float = config.SETTLING_TIME_S
+
+    scan_pattern: Optional[str] = None
+
+    raster: Optional[str] = None
 
     session_name: str = ""
 
@@ -425,19 +512,39 @@ async def scan_start(req: ScanStartRequest):
 
     try:
 
+        x_start = (
+            req.start_position_mm
+            if req.start_position_mm is not None
+            else req.x_start
+        )
+
+        x_end = (
+            req.end_position_mm
+            if req.end_position_mm is not None
+            else req.x_end
+        )
+
+        x_step = (
+            req.step_size_mm
+            if req.step_size_mm is not None
+            else req.x_step
+        )
+
+        pattern = req.scan_pattern or req.raster or config.RASTER_PATTERN
+
         params = ScanParams(
 
-            x_start=req.x_start,
+            x_start=x_start,
 
-            x_end=req.x_end,
+            x_end=x_end,
 
-            x_step=req.x_step,
+            x_step=x_step,
 
             exposure_ms=req.exposure_ms,
 
             settling_s=req.settling_s,
 
-            raster="serpentine",
+            raster=pattern,
 
             session_name=session,
         )
@@ -459,6 +566,8 @@ async def scan_start(req: ScanStartRequest):
         "session": session,
 
         "nx": params.nx,
+
+        "ny": params.ny,
 
         "total_frames": params.total_frames,
     }
