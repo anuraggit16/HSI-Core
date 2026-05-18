@@ -28,11 +28,14 @@ import config
 
 from acquisition.data_cube import data_cube_manager
 from acquisition.error_logger import (
+    get_hardware_errors,
+    get_latest_hardware_events,
     get_recent_errors,
     initialize_error_log,
     log_error,
+    log_hardware_event,
 )
-from acquisition.hal import LabController
+from acquisition.hal import get_lab_controller
 from acquisition.hardware import HardwareDetector
 from acquisition.scan import ScanEngine, ScanParams, ScanState
 
@@ -78,7 +81,7 @@ async def _global_exception_handler(request, exc: Exception):
 
 initialize_error_log()
 
-controller = LabController()
+controller = get_lab_controller()
 
 scan_engine = ScanEngine(controller)
 
@@ -133,6 +136,14 @@ def _processing_active() -> bool:
 
 
 def _sync_processing_state() -> bool:
+
+    global _system_mode_state
+
+    if (
+        _system_mode_state == "SCAN"
+        and scan_engine.state not in {ScanState.RUNNING, ScanState.PAUSED}
+    ):
+        _system_mode_state = "LIVE"
 
     active = _processing_active()
 
@@ -266,6 +277,8 @@ async def get_status():
             ],
 
             "spectral_range": spectral,
+            "debug_mode": bool(getattr(config, "DEBUG_MODE", False)),
+            "hardware_state": hardware.get("hardware_state", {}),
         },
     }
 
@@ -279,6 +292,32 @@ async def get_errors():
         "ok": True,
         "count": len(errors),
         "errors": errors,
+    }
+
+
+@app.get("/api/logs/latest")
+async def latest_logs(limit: int = 50):
+
+    events = get_latest_hardware_events(limit)
+
+    return {
+        "ok": True,
+        "count": len(events),
+        "log_file": "logs/hardware_log.jsonl",
+        "events": events,
+    }
+
+
+@app.get("/api/logs/errors")
+async def hardware_error_logs(limit: int = 50):
+
+    events = get_hardware_errors(limit)
+
+    return {
+        "ok": True,
+        "count": len(events),
+        "log_file": "logs/hardware_log.jsonl",
+        "errors": events,
     }
 
 
@@ -487,7 +526,7 @@ async def hardware_status():
 async def hardware_detect():
 
     detected = HardwareDetector.detect_all()
-    status = controller.status_dict()
+    status = controller.detect_hardware()
 
     return {
         "ok": True,
@@ -564,6 +603,29 @@ async def camera_snapshot():
         media_type="image/jpeg",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/api/camera/start")
+async def camera_start():
+
+    controller.start_camera_stream()
+    await asyncio.sleep(0.15)
+
+    return {
+        "ok": True,
+        "hardware": controller.status_dict(),
+    }
+
+
+@app.post("/api/camera/stop")
+async def camera_stop():
+
+    controller.stop_camera_stream()
+
+    return {
+        "ok": True,
+        "hardware": controller.status_dict(),
+    }
 
 
 # =============================================================================
@@ -668,13 +730,21 @@ async def stage_goto(req: GotoRequest):
     }
 
 
+@app.post("/api/stage/move")
+async def stage_move(req: GotoRequest):
+
+    return await stage_goto(req)
+
+
 @app.post("/api/stage/home")
 async def stage_home():
 
-    if scan_engine.state in {ScanState.RUNNING, ScanState.PAUSED}:
-        raise HTTPException(409, "Stage is reserved by active scan")
+    global _system_mode_state, _live_processing_enabled
 
     before = controller.status_dict()
+    scan_was_active = scan_engine.state in {ScanState.RUNNING, ScanState.PAUSED}
+    if scan_was_active:
+        scan_engine.stop()
 
     await asyncio.get_running_loop().run_in_executor(
 
@@ -682,6 +752,11 @@ async def stage_home():
 
         controller.home
     )
+
+    controller.stop_camera_stream()
+    _system_mode_state = "LIVE"
+    _live_processing_enabled = False
+    _sync_processing_state()
 
     hardware = controller.status_dict()
     physical = bool(hardware.get("stage_physical_connected"))
@@ -702,7 +777,25 @@ async def stage_home():
                 else "Stage home command completed without physical confirmation"
             )
         ),
+        "scan_stopped": scan_was_active,
+        "camera_stream_stopped": True,
+        "target_page": "overview",
         "previous_position_mm": before.get("stage_x_mm", before.get("stage_mm")),
+    }
+
+
+@app.post("/api/stage/zero")
+async def stage_zero():
+
+    result = await asyncio.get_running_loop().run_in_executor(
+        None,
+        controller.zero_calibration,
+    )
+
+    return {
+        "ok": True,
+        "zero": result,
+        "hardware": controller.status_dict(),
     }
 
 
@@ -723,6 +816,8 @@ class ScanStartRequest(BaseModel):
     end_position_mm: Optional[float] = None
 
     step_size_mm: Optional[float] = None
+
+    step_size_um: Optional[float] = None
 
     number_of_images: Optional[int] = None
 
@@ -780,9 +875,13 @@ async def scan_start(req: ScanStartRequest):
         )
 
         x_step = (
-            req.step_size_mm
-            if req.step_size_mm is not None
-            else req.x_step
+            req.step_size_um / 1000.0
+            if req.step_size_um is not None
+            else (
+                req.step_size_mm
+                if req.step_size_mm is not None
+                else req.x_step
+            )
         )
 
         pattern = req.scan_pattern or req.raster or config.RASTER_PATTERN
@@ -821,9 +920,8 @@ async def scan_start(req: ScanStartRequest):
 
         raise HTTPException(400, str(exc)) from exc
 
-    controller.set_camera_exposure(
-        req.exposure_ms * 1000.0
-    )
+    controller.start_camera_stream()
+    controller.set_camera_exposure(req.exposure_ms * 1000.0)
 
     _system_mode_state = "SCAN"
     _sync_processing_state()
@@ -844,6 +942,28 @@ async def scan_start(req: ScanStartRequest):
 
         "scan_params": params.as_dict(),
     }
+
+
+@app.get("/api/scan/start")
+async def scan_start_get(
+    x_start: float = config.SCAN_START_X_MM,
+    x_end: float = config.SCAN_END_X_MM,
+    x_step: float = config.SCAN_STEP_X_MM,
+    exposure_ms: float = config.EXPOSURE_MS,
+    number_of_images: Optional[int] = None,
+    session_name: str = "",
+):
+
+    return await scan_start(
+        ScanStartRequest(
+            x_start=x_start,
+            x_end=x_end,
+            x_step=x_step,
+            exposure_ms=exposure_ms,
+            number_of_images=number_of_images,
+            session_name=session_name,
+        )
+    )
 
 
 @app.post("/api/scan/pause")
@@ -872,6 +992,12 @@ async def scan_stop():
     _sync_processing_state()
 
     return {"ok": True}
+
+
+@app.get("/api/scan/stop")
+async def scan_stop_get():
+
+    return await scan_stop()
 
 
 @app.post("/api/scan/emergency")
@@ -1272,82 +1398,283 @@ def _inspect_tiff_path(path: str) -> dict:
     return result
 
 
-@app.post("/api/analysis/tiff/upload")
-async def upload_tiff(file: UploadFile = File(...)):
+def _inspect_array_payload(arr: np.ndarray, source: str, axes: str = "") -> dict:
+
+    arr = np.asarray(arr)
+    if arr.dtype == object:
+        raise ValueError("Object arrays are not supported")
+
+    if arr.ndim == 1:
+        profile = arr.astype(np.float32)
+        hist, _ = np.histogram(profile, bins=64)
+        preview_arr = profile.reshape(1, -1)
+        png_arr, display = _scale_to_u8(preview_arr)
+        ok, buf = cv2.imencode(".png", png_arr)
+        png_base64 = base64.b64encode(buf.tobytes()).decode("ascii") if ok else None
+        mean = float(np.mean(profile))
+        std = float(np.std(profile))
+        return {
+            "shape": list(arr.shape),
+            "width": 1,
+            "height": 1,
+            "bands": int(arr.shape[0]),
+            "axes": "Z",
+            "dtype": str(arr.dtype),
+            "pages": 1,
+            "png_base64": png_base64,
+            "profile": profile.round(4).astype(float).tolist(),
+            "histogram": hist.astype(int).tolist(),
+            "preview_available": bool(png_base64),
+            "preview_mode": source,
+            "min": round(float(np.min(profile)), 4),
+            "max": round(float(np.max(profile)), 4),
+            "mean": round(mean, 4),
+            "std": round(std, 4),
+            "dynamic_range": round(float(np.max(profile) - np.min(profile)), 4),
+            "snr_estimate": round(mean / max(1e-6, std), 4),
+            **display,
+        }
+
+    shape = list(arr.shape)
+    if not axes:
+        axes = "ZYX" if arr.ndim >= 3 else "YX"
+    plane = _sample_2d(arr, axes)
+    plane_float = np.asarray(plane, dtype=np.float32)
+    hist, _ = np.histogram(plane_float, bins=64)
+    png_base64, preview_meta = _preview_png(arr, axes)
+    profile = _spectral_profile(arr, axes)
+    if not profile:
+        center = plane_float[plane_float.shape[0] // 2]
+        step = max(1, len(center) // 256)
+        profile = center[::step].astype(float).round(4).tolist()
+    mean = float(np.mean(plane_float))
+    std = float(np.std(plane_float))
+    return {
+        "shape": shape,
+        **_tiff_dimensions(shape, axes),
+        "dtype": str(arr.dtype),
+        "pages": 1,
+        "png_base64": png_base64,
+        "profile": profile,
+        "histogram": hist.astype(int).tolist(),
+        "preview_available": bool(png_base64),
+        "source_format": source,
+        "min": round(float(np.min(plane_float)), 4),
+        "max": round(float(np.max(plane_float)), 4),
+        "mean": round(mean, 4),
+        "std": round(std, 4),
+        "dynamic_range": round(float(np.max(plane_float) - np.min(plane_float)), 4),
+        "snr_estimate": round(mean / max(1e-6, std), 4),
+        **preview_meta,
+    }
+
+
+def _parse_envi_header(path: str) -> dict:
+
+    meta: dict[str, str] = {}
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.upper() == "ENVI" or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            meta[key.strip().lower()] = value.strip().strip("{}")
+    return meta
+
+
+def _inspect_envi_pair(hdr_path: str, data_path: str) -> dict:
+
+    hdr = _parse_envi_header(hdr_path)
+    samples = int(hdr.get("samples", 0))
+    lines = int(hdr.get("lines", 0))
+    bands = int(hdr.get("bands", 0))
+    if not samples or not lines or not bands:
+        raise ValueError("ENVI header missing samples/lines/bands")
+
+    dtype_map = {
+        "1": np.uint8,
+        "2": np.int16,
+        "3": np.int32,
+        "4": np.float32,
+        "5": np.float64,
+        "12": np.uint16,
+        "13": np.uint32,
+        "14": np.int64,
+        "15": np.uint64,
+    }
+    dtype = dtype_map.get(str(hdr.get("data type", "")).strip())
+    if dtype is None:
+        raise ValueError(f"Unsupported ENVI data type {hdr.get('data type')}")
+    if hdr.get("byte order", "0").strip() == "1":
+        dtype = np.dtype(dtype).newbyteorder(">")
+
+    offset = int(hdr.get("header offset", 0) or 0)
+    interleave = hdr.get("interleave", "bsq").strip().lower()
+    if interleave == "bsq":
+        shape = (bands, lines, samples)
+        axes = "ZYX"
+    elif interleave == "bil":
+        shape = (lines, bands, samples)
+        axes = "YZX"
+    elif interleave == "bip":
+        shape = (lines, samples, bands)
+        axes = "YXZ"
+    else:
+        raise ValueError(f"Unsupported ENVI interleave {interleave}")
+
+    arr = np.memmap(data_path, dtype=dtype, mode="r", offset=offset, shape=shape)
+    metadata = _inspect_array_payload(arr, "ENVI", axes=axes)
+    metadata["envi"] = {
+        "interleave": interleave,
+        "samples": samples,
+        "lines": lines,
+        "bands": bands,
+    }
+    return metadata
+
+
+def _write_analysis_session(
+    upload_dir: str,
+    session_name: str,
+    original_filename: str,
+    source_files: list[str],
+    total_bytes: int,
+    metadata: dict,
+) -> dict:
+
+    metadata_path = os.path.join(upload_dir, "metadata.json")
+    preview_path = os.path.join(upload_dir, "preview.png")
+
+    if metadata.get("png_base64"):
+        try:
+            with open(preview_path, "wb") as preview:
+                preview.write(base64.b64decode(metadata["png_base64"]))
+        except Exception as exc:
+            log_error("UPLOAD_ERROR", exc, severity="WARNING")
+
+    metadata_for_disk = dict(metadata)
+    metadata_for_disk.pop("png_base64", None)
+
+    session_metadata = {
+        "session_name": session_name,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "state": "ANALYSIS_READY",
+        "source_file": os.path.basename(source_files[0]) if source_files else "",
+        "source_files": [os.path.basename(path) for path in source_files],
+        "original_filename": original_filename,
+        "bytes": total_bytes,
+        "frames_acquired": int(metadata.get("bands") or metadata.get("pages") or 1),
+        "nx": int(metadata.get("width") or 0),
+        "ny": int(metadata.get("height") or 0),
+        "wavelength_min_nm": config.SPECTRAL_MIN_NM,
+        "wavelength_max_nm": config.SPECTRAL_MAX_NM,
+        "spectral_bands": int(metadata.get("bands") or config.SPECTRAL_BANDS),
+        "analysis": metadata_for_disk,
+        "frames": [
+            {
+                "tiff": os.path.basename(source_files[0]) if source_files else None,
+                "preview": "preview.png" if metadata.get("png_base64") else None,
+                "intensity_mean": metadata.get("mean"),
+            }
+        ],
+    }
+    with open(metadata_path, "w", encoding="utf-8") as fh:
+        json.dump(session_metadata, fh, indent=2)
+
+    return session_metadata
+
+
+async def _save_upload_stream(file: UploadFile, target_path: str, max_bytes: int) -> int:
+
+    size = 0
+    with open(target_path, "wb") as fh:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                raise HTTPException(413, "Upload exceeds 500 MB limit")
+            fh.write(chunk)
+    return size
+
+
+async def _analysis_upload_impl(files: list[UploadFile]) -> dict:
 
     global _system_mode_state
 
-    filename = file.filename or "upload.tiff"
-    if not filename.lower().endswith((".tif", ".tiff")):
-        raise HTTPException(400, "Only .tif and .tiff files are supported")
+    if not files:
+        raise HTTPException(400, "No file uploaded")
 
     root = _normalise_save_folder(config.SAVE_FOLDER)
-    upload_name = _safe_upload_name(filename)
-    session_name = f"analysis_{os.path.splitext(upload_name)[0]}"
+    primary_name = files[0].filename or "upload"
+    session_name = f"analysis_{_safe_session_name(os.path.splitext(primary_name)[0])}_{int(time.time())}"
     upload_dir = os.path.join(root, session_name)
     os.makedirs(upload_dir, exist_ok=True)
-    path = os.path.join(upload_dir, f"source{os.path.splitext(upload_name)[1]}")
+    saved: dict[str, str] = {}
+    total_size = 0
 
-    size = 0
     try:
-        with open(path, "wb") as fh:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > _MAX_TIFF_UPLOAD_BYTES:
-                    raise HTTPException(413, "TIFF upload exceeds 500 MB limit")
-                fh.write(chunk)
+        for file in files:
+            filename = file.filename or "upload.bin"
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in {".tif", ".tiff", ".npy", ".csv", ".hdr", ".img", ".dat"}:
+                raise HTTPException(400, f"Unsupported file format: {ext}")
+            safe_name = (
+                f"source{ext}"
+                if ext in {".tif", ".tiff", ".npy", ".csv", ".hdr"}
+                else _safe_session_name(filename)
+            )
+            target = os.path.join(upload_dir, safe_name)
+            total_size += await _save_upload_stream(file, target, _MAX_TIFF_UPLOAD_BYTES)
+            saved[ext] = target
 
-        metadata = _inspect_tiff_path(path)
-        metadata_path = os.path.join(upload_dir, "metadata.json")
-        preview_path = os.path.join(upload_dir, "preview.png")
-
-        if metadata.get("png_base64"):
+        if ".tif" in saved or ".tiff" in saved:
+            source_path = saved.get(".tif") or saved[".tiff"]
+            metadata = _inspect_tiff_path(source_path)
+        elif ".npy" in saved:
+            arr = np.load(saved[".npy"], mmap_mode="r", allow_pickle=False)
+            metadata = _inspect_array_payload(arr, "NPY")
+        elif ".csv" in saved:
             try:
-                with open(preview_path, "wb") as preview:
-                    preview.write(base64.b64decode(metadata["png_base64"]))
-            except Exception as exc:
-                log_error("UPLOAD_ERROR", exc, severity="WARNING")
+                arr = np.loadtxt(saved[".csv"], delimiter=",")
+            except Exception:
+                arr = np.loadtxt(saved[".csv"])
+            metadata = _inspect_array_payload(arr, "CSV spectral")
+        elif ".hdr" in saved:
+            data_path = saved.get(".img") or saved.get(".dat")
+            if not data_path:
+                candidates = [
+                    os.path.join(upload_dir, name)
+                    for name in os.listdir(upload_dir)
+                    if os.path.splitext(name)[1].lower() in {".img", ".dat"}
+                ]
+                data_path = candidates[0] if candidates else None
+            if not data_path:
+                raise HTTPException(400, "ENVI upload requires .hdr plus .img/.dat data file")
+            metadata = _inspect_envi_pair(saved[".hdr"], data_path)
+        else:
+            raise HTTPException(400, "Upload must include TIFF, NPY, CSV, or ENVI HDR")
 
-        metadata_for_disk = dict(metadata)
-        metadata_for_disk.pop("png_base64", None)
-
-        session_metadata = {
-            "session_name": session_name,
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "state": "ANALYSIS_READY",
-            "source_file": os.path.basename(path),
-            "original_filename": filename,
-            "bytes": size,
-            "frames_acquired": int(metadata.get("bands") or metadata.get("pages") or 1),
-            "nx": int(metadata.get("width") or 0),
-            "ny": int(metadata.get("height") or 0),
-            "wavelength_min_nm": config.SPECTRAL_MIN_NM,
-            "wavelength_max_nm": config.SPECTRAL_MAX_NM,
-            "spectral_bands": int(metadata.get("bands") or config.SPECTRAL_BANDS),
-            "analysis": metadata_for_disk,
-            "frames": [
-                {
-                    "tiff": os.path.basename(path),
-                    "preview": "preview.png" if metadata.get("png_base64") else None,
-                    "intensity_mean": metadata.get("mean"),
-                }
-            ],
-        }
-        with open(metadata_path, "w", encoding="utf-8") as fh:
-            json.dump(session_metadata, fh, indent=2)
+        source_files = list(saved.values())
+        _write_analysis_session(
+            upload_dir,
+            session_name,
+            primary_name,
+            source_files,
+            total_size,
+            metadata,
+        )
 
         _system_mode_state = "ANALYSIS"
         _sync_processing_state()
 
         return {
             "ok": True,
-            "filename": filename,
+            "filename": primary_name,
             "session": session_name,
-            "stored_as": os.path.relpath(path, root),
-            "bytes": size,
+            "stored_as": [os.path.relpath(path, root) for path in source_files],
+            "bytes": total_size,
             "metadata": metadata,
             "png_base64": metadata.get("png_base64"),
             "profile": metadata.get("profile", []),
@@ -1356,10 +1683,9 @@ async def upload_tiff(file: UploadFile = File(...)):
 
     except HTTPException:
         try:
-            if os.path.isdir(upload_dir):
-                for name in os.listdir(upload_dir):
-                    os.remove(os.path.join(upload_dir, name))
-                os.rmdir(upload_dir)
+            for name in os.listdir(upload_dir):
+                os.remove(os.path.join(upload_dir, name))
+            os.rmdir(upload_dir)
         except Exception:
             pass
         raise
@@ -1367,19 +1693,34 @@ async def upload_tiff(file: UploadFile = File(...)):
     except Exception as exc:
         log_error("UPLOAD_ERROR", exc)
         try:
-            if os.path.isdir(upload_dir):
-                for name in os.listdir(upload_dir):
-                    os.remove(os.path.join(upload_dir, name))
-                os.rmdir(upload_dir)
+            for name in os.listdir(upload_dir):
+                os.remove(os.path.join(upload_dir, name))
+            os.rmdir(upload_dir)
         except Exception:
             pass
-        raise HTTPException(400, f"TIFF upload failed: {exc}") from exc
+        raise HTTPException(400, f"Upload analysis failed: {exc}") from exc
 
     finally:
-        try:
-            await file.close()
-        except Exception:
-            pass
+        for file in files:
+            try:
+                await file.close()
+            except Exception:
+                pass
+
+
+@app.post("/api/analysis/tiff/upload")
+async def upload_tiff(file: UploadFile = File(...)):
+
+    filename = file.filename or "upload.tiff"
+    if not filename.lower().endswith((".tif", ".tiff")):
+        raise HTTPException(400, "Only .tif and .tiff files are supported")
+    return await _analysis_upload_impl([file])
+
+
+@app.post("/api/analysis/upload")
+async def upload_analysis(files: list[UploadFile] = File(...)):
+
+    return await _analysis_upload_impl(files)
 
 
 @app.post("/api/analysis/tiff/inspect")

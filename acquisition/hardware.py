@@ -53,15 +53,18 @@ class HardwareDetector:
                 )
             
             from pylablib.devices import Thorlabs
-            stage = Thorlabs.KinesisMotor(serial, is_rack_system=True, default_channel=1)
-            stage.close()
+            devices = Thorlabs.list_kinesis_devices()
+            serials = {str(device[0]) for device in devices}
+            if str(serial) not in serials:
+                return None
             
             return HardwareDevice(
                 type=HardwareType.STAGE_X,
                 name="Thorlabs BBD302 (X axis)",
                 serial=serial,
-                connected=True,
-                model="BBD302"
+                connected=False,
+                model="BBD302",
+                status="detected_unverified"
             )
         except Exception as e:
             logger.warning(f"Failed to detect Thorlabs stage {serial}: {e}")
@@ -91,8 +94,9 @@ class HardwareDetector:
                     type=HardwareType.CAMERA,
                     name="Basler Camera",
                     serial=device_info.GetSerialNumber(),
-                    connected=True,
-                    model=device_info.GetModelName()
+                    connected=False,
+                    model=device_info.GetModelName(),
+                    status="detected_unverified"
                 )
         except Exception as e:
             logger.warning(f"Failed to detect Basler camera: {e}")

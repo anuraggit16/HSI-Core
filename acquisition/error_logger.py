@@ -1,27 +1,35 @@
 from __future__ import annotations
 
 import os
+import json
 import threading
+import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Deque
 
 
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "system.log")
+HARDWARE_LOG_FILE = os.path.join(LOG_DIR, "hardware_log.jsonl")
 MAX_ERRORS = 50
+MAX_HARDWARE_EVENTS = 250
 
 _errors: Deque[dict] = deque(maxlen=MAX_ERRORS)
+_hardware_events: Deque[dict] = deque(maxlen=MAX_HARDWARE_EVENTS)
 _lock = threading.RLock()
 _loaded_from_disk = False
+_hardware_loaded_from_disk = False
 
 
 def initialize_error_log(load_existing: bool = True) -> None:
-    global _loaded_from_disk
+    global _loaded_from_disk, _hardware_loaded_from_disk
 
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         with open(LOG_FILE, "a", encoding="utf-8"):
+            pass
+        with open(HARDWARE_LOG_FILE, "a", encoding="utf-8"):
             pass
 
         if load_existing and not _loaded_from_disk:
@@ -33,6 +41,20 @@ def initialize_error_log(load_existing: bool = True) -> None:
                 _errors.clear()
                 _errors.extend(record for record in parsed if record)
             _loaded_from_disk = True
+
+        if load_existing and not _hardware_loaded_from_disk:
+            with open(HARDWARE_LOG_FILE, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()[-MAX_HARDWARE_EVENTS:]
+            parsed_events = []
+            for line in lines:
+                try:
+                    parsed_events.append(json.loads(line))
+                except Exception:
+                    continue
+            with _lock:
+                _hardware_events.clear()
+                _hardware_events.extend(parsed_events)
+            _hardware_loaded_from_disk = True
     except Exception:
         pass
 
@@ -89,6 +111,59 @@ def log_error(module: str, error: Exception, severity: str = "ERROR") -> None:
             pass
 
 
+def log_hardware_event(
+    module: str,
+    message: str,
+    error: Exception | None = None,
+    error_code: str = "",
+    severity: str = "ERROR",
+    extra: dict | None = None,
+) -> None:
+    """Persist a structured hardware diagnostic record as JSONL."""
+
+    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+    module_name = (module or "system").strip().lower()
+    severity_name = (severity or "ERROR").strip().upper()
+    friendly = message or (str(error) if error else "Hardware event")
+    record = {
+        "timestamp": timestamp,
+        "module": module_name,
+        "error_code": error_code or (type(error).__name__ if error else ""),
+        "message": friendly,
+        "severity": severity_name,
+        "trace": "".join(traceback.format_exception(type(error), error, error.__traceback__)) if error else "",
+        "extra": extra or {},
+    }
+
+    with _lock:
+        _hardware_events.append(record)
+        try:
+            initialize_error_log(load_existing=False)
+            with open(HARDWARE_LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    if severity_name in {"ERROR", "CRITICAL"}:
+        log_error(f"{module_name.upper()}_ERROR", RuntimeError(friendly), severity=severity_name)
+
+
 def get_recent_errors() -> list[dict]:
     with _lock:
         return list(_errors)
+
+
+def get_latest_hardware_events(limit: int = 50) -> list[dict]:
+    initialize_error_log(load_existing=True)
+    with _lock:
+        return list(_hardware_events)[-max(1, int(limit)):]
+
+
+def get_hardware_errors(limit: int = 50) -> list[dict]:
+    initialize_error_log(load_existing=True)
+    with _lock:
+        events = [
+            event for event in _hardware_events
+            if str(event.get("severity", "")).upper() in {"ERROR", "CRITICAL"}
+        ]
+    return events[-max(1, int(limit)):]

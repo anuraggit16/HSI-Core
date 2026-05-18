@@ -298,15 +298,18 @@ class ScanEngine:
                 self._current_position_mm = position_mm
 
             try:
-                self._ctrl.move_and_wait(position_mm)
+                self._log(
+                    f"Step {scan_index + 1}/{p.total_frames}: move to {position_mm:.5f} mm"
+                )
+                self._ctrl.move_and_wait(position_mm, fail_on_real_error=True)
                 time.sleep(p.settling_s)
 
-                raw = self._ctrl.capture_frame()
+                raw = self._ctrl.capture_frame(fail_on_real_error=True)
                 timestamp = _iso_now()
-                safe_time = _safe_timestamp(timestamp)
+                scan_time = datetime.now().strftime("%Y%m%d_%H%M%S")
                 file_stem = (
-                    f"{p.session_name}_img_{scan_index + 1:04d}_"
-                    f"{position_mm:.4f}mm_{safe_time}"
+                    f"scan_{scan_time}_{scan_index + 1:04d}_"
+                    f"{position_mm:.5f}mm"
                 )
 
                 frame_meta = {
@@ -376,11 +379,14 @@ class ScanEngine:
                     "nx": p.nx,
                     "ny": p.ny,
                 })
+                self._log(
+                    f"Step {scan_index + 1}/{p.total_frames}: saved {file_stem}"
+                )
 
                 scan_index += 1
 
             except Exception as exc:
-                self._pause_after_error(
+                self._abort_after_error(
                     exc,
                     metadata_path,
                     metadata,
@@ -390,7 +396,7 @@ class ScanEngine:
 
         self._finish("STOPPED", metadata_path, reason="COMPLETED")
 
-    def _pause_after_error(
+    def _abort_after_error(
         self,
         exc: Exception,
         metadata_path: str,
@@ -404,9 +410,10 @@ class ScanEngine:
 
         self._last_failed_index = scan_index
         self._last_error = str(exc)
-        self._last_reason = "PAUSED_AFTER_ERROR"
-        self.state = ScanState.PAUSED
-        self._pause_event.clear()
+        self._last_reason = "ABORTED_AFTER_ERROR"
+        self.state = ScanState.ERROR
+        self._stop_event.set()
+        self._pause_event.set()
 
         metadata["state"] = self.state.value
         metadata["reason"] = self._last_reason
@@ -420,7 +427,7 @@ class ScanEngine:
             log_error("SCAN_ERROR", write_error)
 
         self._log(
-            f"Scan paused at image {scan_index + 1} "
+            f"Scan aborted at image {scan_index + 1} "
             f"({position_mm:.4f} mm): {exc}"
         )
         self.event_queue.put({

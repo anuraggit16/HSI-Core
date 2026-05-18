@@ -9,8 +9,12 @@
 # OPERATING MODE
 # -----------------------------------------------------------------------------
 
-MOCK_MODE = False          # True  → run with simulated hardware (no physical devices needed)
-                          # False → connect to real Thorlabs stage + Basler camera
+MOCK_MODE = False          # True  -> run with simulated hardware (no physical devices needed)
+                          # False -> connect to real Thorlabs stage + Basler camera
+DEBUG_MODE = False         # True -> expose extra diagnostics in logs/API responses
+AUTO_FALLBACK_TO_MOCK = True
+HARDWARE_RETRY_COUNT = 3
+HARDWARE_LOCK_PATH = "logs/hardware_owner.lock"
 
 # -----------------------------------------------------------------------------
 # HARDWARE IDENTIFIERS
@@ -25,6 +29,13 @@ CONTROLLER_SERIAL_Y = "103425854"   # Thorlabs BBD302 channel 2 (Y axis) — set
 
 UNITS_PER_MM = 20_000   # Device units per millimetre (experimentally calibrated)
                          # 20 000 units = 1 mm  →  80 mm = 1 600 000 units
+
+# Corrects the observed +0.00010 mm systematic offset by commanding target-offset.
+STAGE_CALIBRATION_OFFSET_MM = 0.00010
+STAGE_POSITION_TOLERANCE_MM = 0.002
+STAGE_MOVE_TIMEOUT_S = 60.0
+STAGE_BACKLASH_CORRECTION_ENABLED = False
+STAGE_BACKLASH_CORRECTION_MM = 0.02
 
 # Stage travel limits (mm)
 STAGE_X_MIN_MM = 0.0
@@ -67,6 +78,8 @@ SPECTRAL_BANDS   = 120     # Number of spectral bands (mock mode synthesises the
 EXPOSURE_MS      = 100          # Default exposure in milliseconds
 EXPOSURE_US      = EXPOSURE_MS * 1000   # Converted to microseconds for pypylon
 CAMERA_GAIN_DB   = 0.0          # Default analogue gain
+CAMERA_FRAME_STALE_SECONDS = 1.0
+CAMERA_MIN_FPS = 0.1
 
 IMAGE_FORMAT     = ".png"
 
