@@ -9,7 +9,7 @@
 # OPERATING MODE
 # -----------------------------------------------------------------------------
 
-MOCK_MODE = False          # True  → run with simulated hardware (no physical devices needed)
+MOCK_MODE = True          # True  → run with simulated hardware (no physical devices needed)
                           # False → connect to real Thorlabs stage + Basler camera
 
 # -----------------------------------------------------------------------------

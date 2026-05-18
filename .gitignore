@@ -1,0 +1,10 @@
+venv/
+.venv/
+scan_images/
+__pycache__/
+*.pyc
+*.pyd
+*.dll
+*.tiff
+*.png
+.DS_Stores
