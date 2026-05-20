@@ -13,7 +13,7 @@ MOCK_MODE = False          # True  -> run with simulated hardware (no physical d
                           # False -> connect to real Thorlabs stage + Basler camera
 DEBUG_MODE = False         # True -> expose extra diagnostics in logs/API responses
 AUTO_FALLBACK_TO_MOCK = True
-HARDWARE_RETRY_COUNT = 3
+HARDWARE_RETRY_COUNT = 5
 HARDWARE_LOCK_PATH = "logs/hardware_owner.lock"
 
 # -----------------------------------------------------------------------------
@@ -46,6 +46,11 @@ STAGE_Y_MAX_MM = 300.0
 # Stage velocity profile
 STAGE_MIN_VELOCITY  = 20_000    # units/s
 STAGE_MAX_VELOCITY  = 300_000   # units/s
+STAGE_SCAN_VELOCITY_MM_S = 8.0   # Default commanded scan speed in mm/s
+STAGE_MIN_VELOCITY_MM_S = 0.5    # UI/API safety floor
+STAGE_MAX_VELOCITY_MM_S = 15.0   # 300000 units/s / 20000 units/mm
+STAGE_MIN_ACCELERATION_MM_S2 = 1.0
+STAGE_MAX_ACCELERATION_MM_S2 = 25.0
 STAGE_ACCELERATION  = 500_000   # units/s²
 
 # -----------------------------------------------------------------------------
@@ -78,6 +83,10 @@ SPECTRAL_BANDS   = 120     # Number of spectral bands (mock mode synthesises the
 EXPOSURE_MS      = 100          # Default exposure in milliseconds
 EXPOSURE_US      = EXPOSURE_MS * 1000   # Converted to microseconds for pypylon
 CAMERA_GAIN_DB   = 0.0          # Default analogue gain
+CAMERA_MIN_EXPOSURE_MS = 0.01   # Real Basler limits are read from pypylon when available
+CAMERA_MAX_EXPOSURE_MS = 10000.0
+CAMERA_MIN_GAIN_DB = 0.0
+CAMERA_MAX_GAIN_DB = 24.0
 CAMERA_FRAME_STALE_SECONDS = 1.0
 CAMERA_MIN_FPS = 0.1
 

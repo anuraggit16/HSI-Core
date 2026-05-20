@@ -88,7 +88,9 @@
                     <div class="device-row"><span>Camera</span><b id="camera-temp">-- C</b></div>
                     <div class="device-row"><span>Spectral Range</span><b id="spectral-range">--</b></div>
                     <div class="device-row"><span>Bands</span><b id="spectral-bands">--</b></div>
+                    <div class="device-row"><span>Velocity</span><b id="stage-velocity-readout">--</b></div>
                     <div class="device-row"><span>Illumination</span><b id="illumination-state" class="ok">On</b></div>
+                    <div class="limit-readout" id="hardware-limit-readout">Reading hardware limits...</div>
                 </div>
             </section>
 
@@ -125,6 +127,12 @@
                         <div id="camera-feed-status">Camera signal</div>
                         <div class="camera-caption" id="camera-caption">Exposure 100 ms | Gain 0 dB</div>
                     </div>
+                </div>
+                <div class="cube-view-modes">
+                    <button class="cube-view-btn active" data-cube-view="xy">X-Y @ Lambda</button>
+                    <button class="cube-view-btn" data-cube-view="xl">X-Lambda @ Y</button>
+                    <button class="cube-view-btn" data-cube-view="yl">Y-Lambda @ X</button>
+                    <span id="cube-view-readout">Viewing X-Y image at selected lambda</span>
                 </div>
                 <div class="slice-row">
                     <label>X-Min/Max [mm]<input id="slice-x" type="range" min="0" max="100" value="42"></label>
@@ -192,6 +200,11 @@
                     <button id="btn-goto" class="wide-btn">Go To</button>
                     <button id="btn-zero-stage" class="wide-btn">Zero Calibration</button>
                 </div>
+                <div class="stage-velocity-grid">
+                    <label>Velocity [mm/s]<input id="stage-velocity" type="number" min="0.5" max="15" step="0.1" value="8.0"></label>
+                    <label>Acceleration [mm/s2]<input id="stage-accel" type="number" min="1" max="25" step="0.5" value="25"></label>
+                    <button id="btn-apply-stage-velocity" class="wide-btn">Apply Velocity</button>
+                </div>
                 <div id="stage-motion" class="stage-motion">Stage idle | X 0.000 mm</div>
             </section>
 
@@ -217,6 +230,7 @@
                         <option value="serpentine">Serpentine</option>
                     </select>
                 </label>
+                <div id="scan-plan" class="scan-plan">Cube plan: X stage stack + camera Y-lambda frame</div>
                 <div class="check-row">
                     <label><input id="save-png" type="checkbox" checked> PNG</label>
                     <label><input id="save-tiff" type="checkbox" checked> TIFF</label>
@@ -236,6 +250,7 @@
                     <label>Exposure [ms]<input id="exposure-ms" type="number" min="1" max="10000" value="100"></label>
                     <label>Gain [dB]<input id="gain-db" type="number" min="0" max="24" step="0.1" value="0"></label>
                 </div>
+                <div class="limit-readout" id="camera-limit-readout">Exposure and gain limits load from camera</div>
                 <button id="btn-apply-camera" class="wide-btn">Apply Camera</button>
             </section>
 
@@ -380,6 +395,7 @@
                         <div class="device-row"><span>Temperature</span><b id="camera-temp-large">-- C</b></div>
                         <div class="device-row"><span>Status</span><b id="camera-status-large">--</b></div>
                         <div class="device-row"><span>Mode</span><b id="camera-mode-large">--</b></div>
+                        <div class="device-row"><span>Limit Source</span><b id="camera-limit-source">--</b></div>
                     </div>
                 </div>
             </aside>
@@ -389,7 +405,7 @@
             <section class="panel diagnostics-main">
                 <div class="panel-head">
                     <span>Diagnostics</span>
-                    <span id="diagnostics-log-path">logs/hardware_log.jsonl</span>
+                    <span id="diagnostics-log-path">logs/hardware_log.jsonl + error_knowledge_base.md</span>
                 </div>
                 <div class="diagnostic-actions">
                     <button id="btn-refresh-errors" class="wide-btn">Refresh Errors</button>

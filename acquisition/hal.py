@@ -37,6 +37,10 @@ def _as_number(value) -> float:
     return float(value)
 
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(value)))
+
+
 @dataclass
 class HardwareState:
     stage_connected: bool = False
@@ -174,6 +178,9 @@ class MockStage:
         with self._lock:
             self._position_units = 0
 
+    def set_velocity(self, velocity_mm_s: float, acceleration_mm_s2: float | None = None) -> None:
+        config.MOCK_STAGE_VELOCITY_MM_S = float(velocity_mm_s)
+
     def stop(self) -> None:
         self._stop_event.set()
         self._is_moving.clear()
@@ -251,6 +258,19 @@ class RealStage:
         self._move_to_units(self._commanded_units(target_mm))
         self._last_direction = direction
 
+    def set_velocity(self, velocity_mm_s: float, acceleration_mm_s2: float | None = None) -> None:
+        velocity_units = _mm_to_units(velocity_mm_s)
+        acceleration_units = _mm_to_units(
+            acceleration_mm_s2
+            if acceleration_mm_s2 is not None
+            else config.STAGE_ACCELERATION / config.UNITS_PER_MM
+        )
+        self._stage.setup_velocity(
+            min_velocity=0,
+            max_velocity=int(velocity_units),
+            acceleration=int(acceleration_units),
+        )
+
     def wait_move(self, timeout_s: Optional[float] = None) -> None:
         timeout_s = timeout_s or float(getattr(config, "STAGE_MOVE_TIMEOUT_S", 60.0))
         started = time.time()
@@ -323,10 +343,29 @@ class MockCamera:
         self._temperature = config.MOCK_CAMERA_TEMP_CELSIUS
 
     def set_exposure(self, us: float) -> None:
-        self._exposure_us = float(us)
+        min_us = float(getattr(config, "CAMERA_MIN_EXPOSURE_MS", 0.01)) * 1000.0
+        max_us = float(getattr(config, "CAMERA_MAX_EXPOSURE_MS", 10000.0)) * 1000.0
+        self._exposure_us = _clamp(us, min_us, max_us)
 
     def set_gain(self, db: float) -> None:
-        self._gain_db = float(db)
+        self._gain_db = _clamp(
+            db,
+            float(getattr(config, "CAMERA_MIN_GAIN_DB", 0.0)),
+            float(getattr(config, "CAMERA_MAX_GAIN_DB", 24.0)),
+        )
+
+    def limits(self) -> dict:
+        return {
+            "exposure_ms": [
+                float(getattr(config, "CAMERA_MIN_EXPOSURE_MS", 0.01)),
+                float(getattr(config, "CAMERA_MAX_EXPOSURE_MS", 10000.0)),
+            ],
+            "gain_db": [
+                float(getattr(config, "CAMERA_MIN_GAIN_DB", 0.0)),
+                float(getattr(config, "CAMERA_MAX_GAIN_DB", 24.0)),
+            ],
+            "source": "config-fallback",
+        }
 
     def grab_frame(self, timeout_ms: int = 1000) -> np.ndarray:
         h = config.MOCK_FRAME_HEIGHT
@@ -367,13 +406,42 @@ class RealCamera:
         self._temperature_ok = hasattr(self._cam, "DeviceTemperature")
 
     def set_exposure(self, us: float) -> None:
-        self._cam.ExposureTime.SetValue(float(us))
+        node = self._cam.ExposureTime
+        target = _clamp(float(us), float(node.GetMin()), float(node.GetMax()))
+        node.SetValue(target)
 
     def set_gain(self, db: float) -> None:
         try:
-            self._cam.Gain.SetValue(float(db))
+            node = self._cam.Gain
+            target = _clamp(float(db), float(node.GetMin()), float(node.GetMax()))
+            node.SetValue(target)
         except Exception:
             pass
+
+    def limits(self) -> dict:
+        limits = {"source": "basler-pypylon"}
+        try:
+            node = self._cam.ExposureTime
+            limits["exposure_ms"] = [float(node.GetMin()) / 1000.0, float(node.GetMax()) / 1000.0]
+        except Exception:
+            limits["exposure_ms"] = [
+                float(getattr(config, "CAMERA_MIN_EXPOSURE_MS", 0.01)),
+                float(getattr(config, "CAMERA_MAX_EXPOSURE_MS", 10000.0)),
+            ]
+            limits["source"] = "config-fallback"
+        try:
+            node = self._cam.Gain
+            limits["gain_db"] = [float(node.GetMin()), float(node.GetMax())]
+        except Exception:
+            limits["gain_db"] = [
+                float(getattr(config, "CAMERA_MIN_GAIN_DB", 0.0)),
+                float(getattr(config, "CAMERA_MAX_GAIN_DB", 24.0)),
+            ]
+        try:
+            limits["model"] = self._cam.GetDeviceInfo().GetModelName()
+        except Exception:
+            limits["model"] = "Basler camera"
+        return limits
 
     def grab_frame(self, timeout_ms: int = 5000) -> np.ndarray:
         result = self._cam.GrabOne(int(timeout_ms))
@@ -445,6 +513,10 @@ class LabController:
         self._last_error = ""
         self._processing_enabled = False
         self._camera_stream_enabled = True
+        self._stage_velocity_mm_s = float(getattr(config, "STAGE_SCAN_VELOCITY_MM_S", 8.0))
+        self._stage_acceleration_mm_s2 = float(
+            getattr(config, "STAGE_ACCELERATION", 500000) / max(1, getattr(config, "UNITS_PER_MM", 20000))
+        )
 
         self.stage: MockStage | RealStage | None = None
         self.camera: RealCamera | None = None
@@ -461,6 +533,10 @@ class LabController:
         self._frame_times = deque(maxlen=30)
 
         self._initialize_hardware()
+        try:
+            self.set_stage_velocity(self._stage_velocity_mm_s, self._stage_acceleration_mm_s2)
+        except Exception as exc:
+            log_hardware_event("stage", "Initial stage velocity setup failed", error=exc, error_code="STAGE_VELOCITY")
         self._cam_thread = threading.Thread(target=self._camera_loop, daemon=True)
         self._cam_thread.start()
         self._watchdog_thread = threading.Thread(target=self._recovery_loop, daemon=True)
@@ -716,6 +792,58 @@ class LabController:
             target = self.camera or self._fallback_camera
             target.set_gain(db)
 
+    def set_stage_velocity(self, velocity_mm_s: float, acceleration_mm_s2: float | None = None) -> dict:
+        min_v = float(getattr(config, "STAGE_MIN_VELOCITY_MM_S", 0.5))
+        max_v = float(getattr(config, "STAGE_MAX_VELOCITY_MM_S", 15.0))
+        min_a = float(getattr(config, "STAGE_MIN_ACCELERATION_MM_S2", 1.0))
+        max_a = float(getattr(config, "STAGE_MAX_ACCELERATION_MM_S2", 25.0))
+        velocity = float(velocity_mm_s)
+        acceleration = float(acceleration_mm_s2 if acceleration_mm_s2 is not None else self._stage_acceleration_mm_s2)
+        if not (min_v <= velocity <= max_v):
+            raise ValueError(f"Stage velocity must be {min_v:.2f}-{max_v:.2f} mm/s")
+        if not (min_a <= acceleration <= max_a):
+            raise ValueError(f"Stage acceleration must be {min_a:.2f}-{max_a:.2f} mm/s^2")
+        with self._stage_access_lock:
+            if self.stage is None:
+                raise RuntimeError("Stage is not initialized")
+            if hasattr(self.stage, "set_velocity"):
+                self.stage.set_velocity(velocity, acceleration)
+            self._stage_velocity_mm_s = velocity
+            self._stage_acceleration_mm_s2 = acceleration
+            config.STAGE_SCAN_VELOCITY_MM_S = velocity
+            config.STAGE_ACCELERATION = int(round(acceleration * config.UNITS_PER_MM))
+            if self._stage_using_fallback:
+                config.MOCK_STAGE_VELOCITY_MM_S = velocity
+        log_hardware_event(
+            "stage",
+            "Stage velocity profile applied",
+            severity="INFO",
+            extra={"velocity_mm_s": velocity, "acceleration_mm_s2": acceleration},
+        )
+        return {"velocity_mm_s": velocity, "acceleration_mm_s2": acceleration}
+
+    def hardware_limits(self) -> dict:
+        with self._camera_access_lock:
+            camera_target = self.camera or self._fallback_camera
+            camera_limits = camera_target.limits() if hasattr(camera_target, "limits") else MockCamera().limits()
+        return {
+            "stage": {
+                "x_mm": [float(config.STAGE_X_MIN_MM), float(config.STAGE_X_MAX_MM)],
+                "velocity_mm_s": [
+                    float(getattr(config, "STAGE_MIN_VELOCITY_MM_S", 0.5)),
+                    float(getattr(config, "STAGE_MAX_VELOCITY_MM_S", 15.0)),
+                ],
+                "acceleration_mm_s2": [
+                    float(getattr(config, "STAGE_MIN_ACCELERATION_MM_S2", 1.0)),
+                    float(getattr(config, "STAGE_MAX_ACCELERATION_MM_S2", 25.0)),
+                ],
+                "current_velocity_mm_s": self._stage_velocity_mm_s,
+                "current_acceleration_mm_s2": self._stage_acceleration_mm_s2,
+                "controller": "Thorlabs BBD302",
+            },
+            "camera": camera_limits,
+        }
+
     def _validate_x(self, x_mm: float) -> float:
         value = float(x_mm)
         if value < config.STAGE_X_MIN_MM or value > config.STAGE_X_MAX_MM:
@@ -855,6 +983,8 @@ class LabController:
             "stage_x_moving": hw_state.stage_moving,
             "stage_y_moving": False,
             "stage_status": "moving" if hw_state.stage_moving else self._stage_status,
+            "stage_velocity_mm_s": self._stage_velocity_mm_s,
+            "stage_acceleration_mm_s2": self._stage_acceleration_mm_s2,
             "camera_temp": getattr(camera_temp_source, "temperature", -1),
             "camera_physical_connected": self._camera_physical_connected,
             "camera_status": camera_status,

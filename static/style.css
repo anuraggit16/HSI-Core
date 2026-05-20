@@ -518,6 +518,20 @@ select:focus {
 
 .ok { color: var(--green); }
 
+.limit-readout,
+.scan-plan {
+  margin-top: 6px;
+  padding: 6px 7px;
+  border: 1px solid #303737;
+  border-radius: 4px;
+  background: #080c0c;
+  color: #b9c8c4;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .cube-panel { grid-area: cube; }
 .spectral-panel { grid-area: spectral; }
 .wavelength-panel { grid-area: wave; }
@@ -822,10 +836,57 @@ input[type="range"] {
   gap: 5px;
 }
 
+.cube-view-modes {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(160px, 1.1fr);
+  gap: 6px;
+  align-items: center;
+  padding: 7px 9px;
+  border-top: 1px solid var(--line);
+  background: #101515;
+}
+
+.cube-view-btn {
+  height: 26px;
+  border: 1px solid #3c4545;
+  border-radius: 4px;
+  background: #242b2b;
+  color: #d2e7f8;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.cube-view-btn.active {
+  border-color: #24784c;
+  background: #123424;
+  color: #83f0aa;
+}
+
+#cube-view-readout {
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
 .stage-control-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 86px minmax(0, 1fr);
   gap: 5px;
+}
+
+.stage-velocity-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.stage-velocity-grid button {
+  grid-column: 1 / -1;
 }
 
 .stage-control-grid #goto-x {
@@ -1395,7 +1456,8 @@ body:not([data-mode="analysis"]) .upload-analysis .analysis-grid {
   }
 
   .analysis-plot-grid,
-  .diagnostic-actions {
+  .diagnostic-actions,
+  .cube-view-modes {
     grid-template-columns: 1fr;
   }
 }

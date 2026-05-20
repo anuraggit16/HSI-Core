@@ -270,6 +270,7 @@ async def get_status():
                     config.STAGE_X_MAX_MM
                 ]
             },
+            "hardware_limits": controller.hardware_limits(),
 
             "wavelength_nm": [
                 spectral["min_wavelength_nm"],
@@ -617,6 +618,15 @@ async def camera_start():
     }
 
 
+@app.get("/api/hardware/limits")
+async def hardware_limits():
+
+    return {
+        "ok": True,
+        "limits": controller.hardware_limits(),
+    }
+
+
 @app.post("/api/camera/stop")
 async def camera_stop():
 
@@ -642,19 +652,39 @@ class CameraSettings(BaseModel):
 @app.post("/api/camera/settings")
 async def set_camera_settings(settings: CameraSettings):
 
+    limits = controller.hardware_limits()
+    exposure_limits = limits["camera"].get("exposure_ms", [0.01, 10000.0])
+    gain_limits = limits["camera"].get("gain_db", [0.0, 24.0])
+
     if settings.exposure_ms is not None:
+        if not (exposure_limits[0] <= settings.exposure_ms <= exposure_limits[1]):
+            raise HTTPException(
+                400,
+                f"Exposure must be {exposure_limits[0]:.3f}-{exposure_limits[1]:.3f} ms",
+            )
 
         controller.set_camera_exposure(
             settings.exposure_ms * 1000.0
         )
 
     if settings.exposure_us is not None:
+        exposure_ms = settings.exposure_us / 1000.0
+        if not (exposure_limits[0] <= exposure_ms <= exposure_limits[1]):
+            raise HTTPException(
+                400,
+                f"Exposure must be {exposure_limits[0]:.3f}-{exposure_limits[1]:.3f} ms",
+            )
 
         controller.set_camera_exposure(
             settings.exposure_us
         )
 
     if settings.gain_db is not None:
+        if not (gain_limits[0] <= settings.gain_db <= gain_limits[1]):
+            raise HTTPException(
+                400,
+                f"Gain must be {gain_limits[0]:.2f}-{gain_limits[1]:.2f} dB",
+            )
 
         controller.set_camera_gain(
             settings.gain_db
@@ -709,6 +739,12 @@ class GotoRequest(BaseModel):
     x_mm: float
 
 
+class StageVelocityRequest(BaseModel):
+
+    velocity_mm_s: float
+    acceleration_mm_s2: Optional[float] = None
+
+
 @app.post("/api/stage/goto")
 async def stage_goto(req: GotoRequest):
 
@@ -726,7 +762,8 @@ async def stage_goto(req: GotoRequest):
 
     return {
         "ok": True,
-        "hardware": controller.status_dict()
+        "hardware": controller.status_dict(),
+        "limits": controller.hardware_limits(),
     }
 
 
@@ -753,7 +790,6 @@ async def stage_home():
         controller.home
     )
 
-    controller.stop_camera_stream()
     _system_mode_state = "LIVE"
     _live_processing_enabled = False
     _sync_processing_state()
@@ -778,7 +814,7 @@ async def stage_home():
             )
         ),
         "scan_stopped": scan_was_active,
-        "camera_stream_stopped": True,
+        "camera_stream_stopped": False,
         "target_page": "overview",
         "previous_position_mm": before.get("stage_x_mm", before.get("stage_mm")),
     }
@@ -796,6 +832,25 @@ async def stage_zero():
         "ok": True,
         "zero": result,
         "hardware": controller.status_dict(),
+    }
+
+
+@app.post("/api/stage/velocity")
+async def stage_velocity(req: StageVelocityRequest):
+
+    try:
+        result = controller.set_stage_velocity(
+            req.velocity_mm_s,
+            req.acceleration_mm_s2,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return {
+        "ok": True,
+        "velocity": result,
+        "hardware": controller.status_dict(),
+        "limits": controller.hardware_limits(),
     }
 
 
@@ -824,6 +879,10 @@ class ScanStartRequest(BaseModel):
     auto_calculate_images: bool = True
 
     exposure_ms: float = config.EXPOSURE_MS
+
+    stage_velocity_mm_s: Optional[float] = None
+
+    stage_acceleration_mm_s2: Optional[float] = None
 
     settling_s: float = config.SETTLING_TIME_S
 
@@ -884,6 +943,13 @@ async def scan_start(req: ScanStartRequest):
             )
         )
 
+        if (
+            req.number_of_images is not None
+            and req.number_of_images > 0
+            and not req.auto_calculate_images
+        ):
+            x_end = x_start + x_step * max(0, req.number_of_images - 1)
+
         pattern = req.scan_pattern or req.raster or config.RASTER_PATTERN
         settling_s = (
             req.settling_time_s
@@ -922,6 +988,11 @@ async def scan_start(req: ScanStartRequest):
 
     controller.start_camera_stream()
     controller.set_camera_exposure(req.exposure_ms * 1000.0)
+    if req.stage_velocity_mm_s is not None:
+        controller.set_stage_velocity(
+            req.stage_velocity_mm_s,
+            req.stage_acceleration_mm_s2,
+        )
 
     _system_mode_state = "SCAN"
     _sync_processing_state()

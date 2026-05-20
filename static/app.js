@@ -6,6 +6,7 @@ const state = {
   liveProcessingEnabled: false,
   mockMode: true,
   hardwareState: { mode: "MOCK", last_error: "" },
+  hardwareLimits: null,
   scan: { state: "IDLE", percent: 0, nx: 0, ny: 0, session: "" },
   heatmap: [],
   tempHistory: Array(80).fill(22.5),
@@ -28,6 +29,7 @@ const state = {
     lastX: 0,
     lastY: 0,
     probe: { x: 0.42, y: 0.7, l: 680, intensity: 0 },
+    sliceMode: "xy",
   },
   uploadedImage: null,
   analysisCube: null,
@@ -77,6 +79,7 @@ document.addEventListener("DOMContentLoaded", () => {
   fetchDatasets();
   fetchStorageConfig();
   fetchSpectralRange();
+  fetchHardwareLimits();
   fetchErrors();
   updateImageCount();
   updateModeUi();
@@ -155,6 +158,7 @@ function bindControls() {
   $("btn-emergency").addEventListener("click", emergencyStop);
   $("btn-home").addEventListener("click", homeStage);
   $("btn-goto").addEventListener("click", gotoStage);
+  bindIf("btn-apply-stage-velocity", "click", applyStageVelocity);
   $("btn-detect").addEventListener("click", detectHardware);
   $("btn-capture").addEventListener("click", () => toast("Live frame held in acquisition buffer", "info"));
   $("btn-apply-camera").addEventListener("click", applyCameraSettings);
@@ -171,7 +175,7 @@ function bindControls() {
     $(id).addEventListener("input", updateWavelengthReadout);
   });
 
-  ["x-start", "x-end", "x-step", "settling-s", "image-count", "auto-count", "scan-pattern"].forEach((id) => {
+  ["x-start", "x-end", "x-step", "settling-s", "image-count", "auto-count", "scan-pattern", "stage-velocity", "stage-accel"].forEach((id) => {
     $(id).addEventListener("input", () => {
       updateImageCount();
       drawScanMap();
@@ -232,6 +236,11 @@ function bindControls() {
     state.cubeNeedsDraw = true;
     if (state.showLiveCube && state.processingActive) fetchSpectrum();
   });
+
+  document.querySelectorAll("[data-cube-view]").forEach((button) => {
+    button.addEventListener("click", () => setCubeSliceMode(button.dataset.cubeView));
+  });
+  setCubeSliceMode(state.cubeView.sliceMode);
 
   ["slice-x", "slice-y", "slice-l"].forEach((id) => {
     $(id).addEventListener("input", updateCubeProbeFromControls);
@@ -479,6 +488,10 @@ function updateTelemetry(data) {
     updateSpectralRangeUi(data.config.spectral_range);
   }
 
+  if (data.config && data.config.hardware_limits) {
+    updateHardwareLimitsUi(data.config.hardware_limits);
+  }
+
   if (data.hardware) {
     const hw = data.hardware;
     const xPos = Number(hw.stage_x_mm ?? hw.stage_mm ?? 0);
@@ -498,6 +511,7 @@ function updateTelemetry(data) {
     $("focus-readout").textContent = `${hw.lens_focus ?? "--"} ppm`;
     $("illumination-state").textContent = hw.illumination ? "On" : "Off";
     $("illumination-state").className = hw.illumination ? "ok" : "";
+    updateStageVelocityUi(hw);
     updateCameraConnection(hw);
     updateStageConnection(hw);
     updateDiagnosticsStatus(hw);
@@ -585,16 +599,22 @@ function handleEvent(event) {
 }
 
 async function startScan() {
+  updateImageCount();
   const xStart = Number($("x-start").value);
   const xEnd = Number($("x-end").value);
   const xStep = Number($("x-step").value);
+  const imageCount = Number($("image-count").value);
+  const autoCount = $("auto-count").value === "true";
+  const finalX = autoCount ? xEnd : xStart + xStep * Math.max(0, imageCount - 1);
   const payload = {
     x_start: xStart,
-    x_end: xEnd,
+    x_end: finalX,
     x_step: xStep,
-    number_of_images: Number($("image-count").value),
-    auto_calculate_images: $("auto-count").value === "true",
+    number_of_images: imageCount,
+    auto_calculate_images: autoCount,
     exposure_ms: Number($("exposure-ms").value),
+    stage_velocity_mm_s: Number($("stage-velocity").value),
+    stage_acceleration_mm_s2: Number($("stage-accel").value),
     settling_s: Number($("settling-s").value),
     settling_time_s: Number($("settling-s").value),
     raster: $("scan-pattern").value,
@@ -605,6 +625,8 @@ async function startScan() {
     wavelength_min_nm: Number($("scan-wl-min").value),
     wavelength_max_nm: Number($("scan-wl-max").value),
   };
+
+  if (!confirmScanParameters(payload)) return;
 
   try {
     const result = await postJson("/api/scan/start", payload);
@@ -674,6 +696,21 @@ async function homeStage() {
     setStageControlsDisabled(false);
     refreshStatus();
   }
+}
+
+function confirmScanParameters(payload) {
+  const message = [
+    "Start hyperspectral scan with these parameters?",
+    "",
+    `X start: ${payload.x_start.toFixed(3)} mm`,
+    `X final: ${payload.x_end.toFixed(3)} mm`,
+    `Step: ${payload.x_step.toFixed(4)} mm`,
+    `Images: ${payload.number_of_images}`,
+    `Velocity: ${payload.stage_velocity_mm_s.toFixed(2)} mm/s`,
+    `Exposure: ${payload.exposure_ms.toFixed(3)} ms`,
+    `Lambda: ${payload.wavelength_min_nm}-${payload.wavelength_max_nm} nm`,
+  ].join("\n");
+  return window.confirm(message);
 }
 
 async function jog(axis, direction) {
@@ -849,7 +886,8 @@ function updateStageConnection(hw) {
 async function applyCameraSettings() {
   const exposure = Number($("exposure-ms").value);
   const gain = Number($("gain-db").value);
-  await postJson("/api/camera/settings", { exposure_ms: exposure, gain_db: gain });
+  const result = await postJson("/api/camera/settings", { exposure_ms: exposure, gain_db: gain });
+  if (result.limits) updateHardwareLimitsUi(result.limits);
   $("camera-caption").textContent = `Exposure ${exposure} ms | Gain ${gain} dB`;
   const capLarge = $("camera-caption-large");
   if (capLarge) capLarge.textContent = `Exposure ${exposure} ms | Gain ${gain} dB`;
@@ -872,6 +910,7 @@ async function detectHardware() {
   try {
     await postJson("/api/hardware/detect");
     await refreshStatus();
+    await fetchHardwareLimits();
     toast("Hardware detection complete", "success");
   } catch {
     toast("Hardware detection failed", "error");
@@ -886,6 +925,22 @@ async function zeroStage() {
   } catch (error) {
     reportUiError(error.message || "Zero calibration failed", "stage/zero");
     toast(error.message || "Zero calibration failed", "error");
+  }
+}
+
+async function applyStageVelocity() {
+  try {
+    const payload = {
+      velocity_mm_s: Number($("stage-velocity").value),
+      acceleration_mm_s2: Number($("stage-accel").value),
+    };
+    const result = await postJson("/api/stage/velocity", payload);
+    if (result.limits) updateHardwareLimitsUi(result.limits);
+    if (result.hardware) updateTelemetry({ hardware: result.hardware, events: [] });
+    toast("Stage velocity applied", "success");
+  } catch (error) {
+    reportUiError(error.message || "Stage velocity rejected", "stage/velocity");
+    toast(error.message || "Stage velocity rejected", "error");
   }
 }
 
@@ -1158,6 +1213,18 @@ async function fetchSpectralRange() {
   }
 }
 
+async function fetchHardwareLimits() {
+  try {
+    const result = await fetchJson("/api/hardware/limits");
+    updateHardwareLimitsUi(result.limits || result);
+  } catch {
+    updateHardwareLimitsUi({
+      stage: { x_mm: [0, 300], velocity_mm_s: [0.5, 15], acceleration_mm_s2: [1, 25], current_velocity_mm_s: 8, current_acceleration_mm_s2: 25 },
+      camera: { exposure_ms: [0.01, 10000], gain_db: [0, 24], source: "config-fallback" },
+    });
+  }
+}
+
 function updateSpectralRangeUi(range) {
   $("spectral-range").textContent = `${range.min_wavelength_nm}-${range.max_wavelength_nm} nm`;
   $("spectral-bands").textContent = `${range.bands}`;
@@ -1165,14 +1232,94 @@ function updateSpectralRangeUi(range) {
   $("wl-min").max = range.max_wavelength_nm;
   $("wl-max").min = range.min_wavelength_nm;
   $("wl-max").max = range.max_wavelength_nm;
+  ["scan-wl-min", "slice-l"].forEach((id) => {
+    const el = $(id);
+    if (el) {
+      el.min = range.min_wavelength_nm;
+      el.max = range.max_wavelength_nm;
+    }
+  });
+  const scanMax = $("scan-wl-max");
+  if (scanMax) {
+    scanMax.min = range.min_wavelength_nm;
+    scanMax.max = range.max_wavelength_nm;
+  }
+}
+
+function updateHardwareLimitsUi(limits) {
+  if (!limits) return;
+  state.hardwareLimits = limits;
+  const stage = limits.stage || {};
+  const camera = limits.camera || {};
+  const [xMin = 0, xMax = 300] = stage.x_mm || [];
+  const [vMin = 0.5, vMax = 15] = stage.velocity_mm_s || [];
+  const [aMin = 1, aMax = 25] = stage.acceleration_mm_s2 || [];
+  const [eMin = 0.01, eMax = 10000] = camera.exposure_ms || [];
+  const [gMin = 0, gMax = 24] = camera.gain_db || [];
+
+  [["x-start", xMin, xMax], ["x-end", xMin, xMax], ["goto-x", xMin, xMax]].forEach(([id, min, max]) => {
+    const el = $(id);
+    if (el) {
+      el.min = min;
+      el.max = max;
+    }
+  });
+  [["stage-velocity", vMin, vMax], ["stage-accel", aMin, aMax]].forEach(([id, min, max]) => {
+    const el = $(id);
+    if (el) {
+      el.min = min;
+      el.max = max;
+    }
+  });
+  ["exposure-ms", "camera-page-exposure"].forEach((id) => {
+    const el = $(id);
+    if (el) {
+      el.min = eMin;
+      el.max = eMax;
+    }
+  });
+  ["gain-db", "camera-page-gain"].forEach((id) => {
+    const el = $(id);
+    if (el) {
+      el.min = gMin;
+      el.max = gMax;
+    }
+  });
+
+  const limitText = `X ${xMin}-${xMax} mm | velocity ${vMin}-${vMax} mm/s | exposure ${Number(eMin).toFixed(3)}-${Number(eMax).toFixed(0)} ms | gain ${gMin}-${gMax} dB`;
+  ["hardware-limit-readout", "camera-limit-readout"].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = limitText;
+  });
+  const source = $("camera-limit-source");
+  if (source) source.textContent = camera.model ? `${camera.model} | ${camera.source || "limits"}` : (camera.source || "config-fallback");
+
+  if ($("stage-velocity") && stage.current_velocity_mm_s) $("stage-velocity").value = Number(stage.current_velocity_mm_s).toFixed(2);
+  if ($("stage-accel") && stage.current_acceleration_mm_s2) $("stage-accel").value = Number(stage.current_acceleration_mm_s2).toFixed(2);
+}
+
+function updateStageVelocityUi(hw) {
+  const readout = $("stage-velocity-readout");
+  if (readout) {
+    readout.textContent = `${Number(hw.stage_velocity_mm_s || $("stage-velocity")?.value || 0).toFixed(2)} mm/s`;
+  }
 }
 
 function updateImageCount() {
-  if ($("auto-count").value !== "true") return;
   const start = Number($("x-start").value);
   const end = Number($("x-end").value);
   const step = Math.max(0.0001, Number($("x-step").value));
-  $("image-count").value = Math.max(1, Math.round(Math.abs(end - start) / step) + 1);
+  if ($("auto-count").value === "true") {
+    $("image-count").value = Math.max(1, Math.round(Math.abs(end - start) / step) + 1);
+  } else {
+    const count = Math.max(1, Math.round(Number($("image-count").value) || 1));
+    const finalX = start + step * (count - 1);
+    $("x-end").value = finalX.toFixed(4);
+  }
+  const plan = $("scan-plan");
+  if (plan) {
+    plan.textContent = `Cube plan: X ${Number($("x-start").value).toFixed(3)} -> ${Number($("x-end").value).toFixed(3)} mm | ${$("image-count").value} frames | camera line = Y x lambda`;
+  }
 }
 
 function updateSpectralStats() {
@@ -1193,6 +1340,13 @@ function updateWavelengthReadout() {
   $("wl-readout").textContent = `${min} nm - ${max} nm`;
   $("scan-wl-min").value = min;
   $("scan-wl-max").value = max;
+  const slice = $("slice-l");
+  if (slice) {
+    slice.min = min;
+    slice.max = max;
+    slice.value = clamp(Number(slice.value), min, max);
+    updateCubeProbeFromControls();
+  }
 }
 
 async function fetchJson(url) {
@@ -1334,6 +1488,7 @@ function drawCube() {
   })).sort((a, b) => a.depth - b.depth);
 
   faces.forEach((face) => drawFace(ctx, face.projected.map((p) => [p.x, p.y]), face.color, face.alpha));
+  drawCubeSlicePlane(ctx, metrics);
 
   for (let z = 0; z <= 1.001; z += 0.075) {
     const heat = cubeIntensity(0.56, 0.52, z) / 620;
@@ -1420,6 +1575,24 @@ function drawCubeWire(ctx, metrics) {
   edges.forEach(([a, b]) => drawProjectedLine(ctx, a, b, metrics, "#d7e4ff"));
 }
 
+function drawCubeSlicePlane(ctx, metrics) {
+  const probe = state.cubeView.probe;
+  const x = clamp(probe.x / 100, 0, 1);
+  const y = clamp(probe.y / 100, 0, 1);
+  const [lMin, lMax] = wavelengthBounds();
+  const z = clamp((probe.l - lMin) / Math.max(1, lMax - lMin), 0, 1);
+  const mode = state.cubeView.sliceMode || "xy";
+  const planePoints = {
+    xy: [[0, 0, z], [1, 0, z], [1, 1, z], [0, 1, z]],
+    xl: [[0, y, 0], [1, y, 0], [1, y, 1], [0, y, 1]],
+    yl: [[x, 0, 0], [x, 1, 0], [x, 1, 1], [x, 0, 1]],
+  }[mode];
+  const color = { xy: "#f2b34b", xl: "#59b7ff", yl: "#ba77ff" }[mode];
+  const projected = planePoints.map((point) => projectCubePoint(point, metrics));
+  drawFace(ctx, projected.map((p) => [p.x, p.y]), color, 0.18);
+  drawWire(ctx, projected.map((p) => [p.x, p.y]), color);
+}
+
 function drawProjectedLine(ctx, a, b, metrics, color) {
   const p1 = projectCubePoint(a, metrics);
   const p2 = projectCubePoint(b, metrics);
@@ -1430,7 +1603,8 @@ function drawCubeProbe(ctx, metrics) {
   const probe = state.cubeView.probe;
   const x = clamp(probe.x / 100, 0, 1);
   const y = clamp(probe.y / 100, 0, 1);
-  const z = clamp((probe.l - 400) / 600, 0, 1);
+  const [lMin, lMax] = wavelengthBounds();
+  const z = clamp((probe.l - lMin) / Math.max(1, lMax - lMin), 0, 1);
   const p = projectCubePoint([x, y, z], metrics);
   const floor = projectCubePoint([x, y, 0], metrics);
   const ceiling = projectCubePoint([x, y, 1], metrics);
@@ -1462,6 +1636,22 @@ function updateCubeProbeFromControls() {
   setCubeProbe(x, y, l);
 }
 
+function setCubeSliceMode(mode = "xy") {
+  state.cubeView.sliceMode = ["xy", "xl", "yl"].includes(mode) ? mode : "xy";
+  document.querySelectorAll("[data-cube-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.cubeView === state.cubeView.sliceMode);
+  });
+  const label = $("cube-view-readout");
+  if (label) {
+    label.textContent = {
+      xy: "Viewing X-Y image at selected lambda",
+      xl: "Viewing X-lambda slice at selected Y",
+      yl: "Viewing Y-lambda slice at selected X",
+    }[state.cubeView.sliceMode];
+  }
+  state.cubeNeedsDraw = true;
+}
+
 function updateCubeProbeFromPointer(event) {
   const canvas = $("cube-canvas");
   const rect = canvas.getBoundingClientRect();
@@ -1478,13 +1668,20 @@ function updateCubeProbeFromPointer(event) {
 }
 
 function setCubeProbe(x, y, l) {
-  const z = clamp((l - 400) / 600, 0, 1);
+  const [lMin, lMax] = wavelengthBounds();
+  const z = clamp((l - lMin) / Math.max(1, lMax - lMin), 0, 1);
   const intensity = cubeIntensity(x / 100, y / 100, z);
   state.cubeView.probe = { x, y, l, intensity };
   $("cube-x-detail").textContent = `${x.toFixed(1)} mm`;
   $("cube-y-detail").textContent = `${y.toFixed(1)} mm`;
   $("cube-l-detail").textContent = `${Math.round(l)} nm`;
   $("cube-i-detail").textContent = `${intensity.toFixed(1)} a.u.`;
+}
+
+function wavelengthBounds() {
+  const min = Number($("scan-wl-min")?.value || $("wl-min")?.min || 400);
+  const max = Number($("scan-wl-max")?.value || $("wl-max")?.max || 1000);
+  return min < max ? [min, max] : [400, 1000];
 }
 
 function cubeIntensity(x, y, z) {

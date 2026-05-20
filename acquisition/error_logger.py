@@ -12,6 +12,7 @@ from typing import Deque
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "system.log")
 HARDWARE_LOG_FILE = os.path.join(LOG_DIR, "hardware_log.jsonl")
+ERROR_KNOWLEDGE_FILE = os.path.join(LOG_DIR, "error_knowledge_base.md")
 MAX_ERRORS = 50
 MAX_HARDWARE_EVENTS = 250
 
@@ -31,6 +32,14 @@ def initialize_error_log(load_existing: bool = True) -> None:
             pass
         with open(HARDWARE_LOG_FILE, "a", encoding="utf-8"):
             pass
+        if not os.path.isfile(ERROR_KNOWLEDGE_FILE):
+            with open(ERROR_KNOWLEDGE_FILE, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "# HSI-Core Error Knowledge Base\n\n"
+                    "This file is updated automatically whenever the app records a system, camera, stage, scan, upload, or UI error.\n\n"
+                    "| Time | Module | Severity | Type/Code | Message | Likely Action |\n"
+                    "| --- | --- | --- | --- | --- | --- |\n"
+                )
 
         if load_existing and not _loaded_from_disk:
             with open(LOG_FILE, encoding="utf-8", errors="replace") as fh:
@@ -107,6 +116,7 @@ def log_error(module: str, error: Exception, severity: str = "ERROR") -> None:
             initialize_error_log(load_existing=False)
             with open(LOG_FILE, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
+            _append_error_knowledge(timestamp, module_name, severity_name, error_type, message)
         except Exception:
             pass
 
@@ -141,6 +151,13 @@ def log_hardware_event(
             initialize_error_log(load_existing=False)
             with open(HARDWARE_LOG_FILE, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            _append_error_knowledge(
+                timestamp,
+                f"{module_name.upper()}_EVENT",
+                severity_name,
+                error_code or (type(error).__name__ if error else "EVENT"),
+                friendly,
+            )
         except Exception:
             pass
 
@@ -167,3 +184,32 @@ def get_hardware_errors(limit: int = 50) -> list[dict]:
             if str(event.get("severity", "")).upper() in {"ERROR", "CRITICAL"}
         ]
     return events[-max(1, int(limit)):]
+
+
+def _append_error_knowledge(timestamp: str, module: str, severity: str, code: str, message: str) -> None:
+    safe = lambda value: str(value).replace("|", "\\|").replace("\n", " ").strip()
+    action = _suggest_action(module, message)
+    with open(ERROR_KNOWLEDGE_FILE, "a", encoding="utf-8") as fh:
+        fh.write(
+            f"| {safe(timestamp)} | {safe(module)} | {safe(severity)} | "
+            f"{safe(code)} | {safe(message)} | {safe(action)} |\n"
+        )
+
+
+def _suggest_action(module: str, message: str) -> str:
+    text = f"{module} {message}".lower()
+    if "camera" in text and ("busy" in text or "exclusively" in text or "lock" in text):
+        return "Close other camera apps/old servers, then press Detect Hardware."
+    if "camera" in text:
+        return "Check Basler connection, exposure/gain limits, and press Start Stream or Detect Hardware."
+    if "stage" in text and "outside limits" in text:
+        return "Reduce start/end/goto position inside configured stage travel."
+    if "stage" in text:
+        return "Check Thorlabs power/USB/Kinesis, then press Detect Hardware or Home Stage."
+    if "scan" in text:
+        return "Review scan parameters, camera stream, and last failed image index."
+    if "upload" in text:
+        return "Check file format, size, and ENVI/TIFF metadata."
+    if "ui" in text:
+        return "Refresh the browser and check the latest UI action."
+    return "Inspect logs/hardware_log.jsonl and repeat the operation after correcting the cause."
