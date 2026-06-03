@@ -1,12 +1,12 @@
 venv/
 .venv/
-
+logs/
 scan_images/
-
+scans/
 logs/*.log
 logs/*.jsonl
 logs/*.lock
-
+*.cube
 __pycache__/
 *.pyc
 
@@ -14,3 +14,14 @@ node_modules/
 
 dist/
 build/
+
+logs/
+*.tiff
+*.tif
+*.png
+*.jpg
+*.mat
+*.raw
+*.hdr
+*.npy
+*.npz   
