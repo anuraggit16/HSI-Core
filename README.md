@@ -22,12 +22,13 @@ HSI-Core is a complete software suite for **automated hyperspectral data acquisi
 
 ✅ **Data Management**
 - Scientific TIFF stacks with embedded metadata
-- Automatic cube compression (.npz)
+- Automatic canonical cube compression (`.npz`) with optional duplicate `.npy`
 - Dataset browser and search
 - Session save/load with full provenance
 
 ✅ **Analysis & Visualization**
 - 3D data cube rendering
+- Mode-specific cube viewer controls for scientifically valid X/Y/lambda slicing
 - Spectral plots and signatures
 - ROI analysis tools
 - Intensity heatmaps with colormap selection
@@ -77,6 +78,43 @@ python3 server_enhanced.py
 # Open browser to http://localhost:8000
 ```
 
+## Generated Data And Storage
+
+HSI-Core stores generated acquisition data under `scans/` by default. New scan
+sessions keep raw scientific frames unless `config.STORAGE_POLICY["keep_raw_frames"]`
+is explicitly changed, and save compressed `data_cube.npz` as the canonical cube.
+Set `config.STORAGE_POLICY["keep_npy_cube"] = True` only when an additional
+memory-mappable `.npy` cube is required.
+
+Generated scan data, logs, virtual environments, caches, build outputs, and
+large scientific data files are ignored by git. Keep source code, calibration
+files, and documentation in git; keep acquired datasets in lab storage or
+backups.
+
+Audit storage without deleting anything:
+
+```bash
+python scripts/storage_audit.py
+```
+
+Preview generated cleanup without deleting anything:
+
+```bash
+python scripts/cleanup_generated_data.py
+```
+
+Delete only temp/cache/build outputs after reviewing the dry run:
+
+```bash
+python scripts/cleanup_generated_data.py --yes
+```
+
+Scan data is never included in cleanup unless both flags are present:
+
+```bash
+python scripts/cleanup_generated_data.py --delete-scans --yes
+```
+
 ## Production Lab Startup
 
 Use only one backend process when real hardware is attached. Multiple Uvicorn
@@ -94,6 +132,27 @@ python -m uvicorn server_enhanced:app --host 127.0.0.1 --port 8000
 
 The UI now trusts the unified `HardwareState` only. A device is shown connected
 only after a real stage command or camera frame grab succeeds.
+
+### Replaceable Splash Screen
+
+Startup splash assets live in `frontend/assets/splash/`.
+
+- Replace `frontend/assets/splash/splash.mp4` to change the primary startup
+  video without editing code.
+- Optionally add `splash.webm` for a browser fallback video.
+- Optionally replace `splash-poster.png` for the initial video poster.
+- Tune startup behavior in `splash-config.json`:
+  `video`, `fallbackVideo`, `poster`, `minDisplayMs`, `fadeMs`,
+  `showStatusText`, `loopAfterEnd`, `playDurationMs`, `audioEnabled`, and
+  `volume`.
+
+The splash video plays once by default. The bundled splash is configured to run
+the first 9 seconds with audio requested. If the browser blocks audible autoplay,
+the splash retries muted playback and records that in the browser console. If
+the backend is still starting after the video ends, the app fades to a compact
+instrument-style loading state and continues polling `GET /api/health` until
+the dashboard is ready. The health check is read-only and does not initialize
+hardware.
 
 ### Mock Mode
 
@@ -178,6 +237,12 @@ print(roi_stats['mean_spectrum'])
 ```
 
 ### REST API
+
+Interactive Swagger API docs are available after the server starts:
+
+- Swagger UI: `http://localhost:8000/api/docs`
+- OpenAPI JSON: `http://localhost:8000/api/openapi.json`
+- ReDoc: `http://localhost:8000/api/redoc`
 
 ```bash
 # Get hardware status
@@ -288,6 +353,14 @@ HSI-Core/
 - Spectral angle mapping
 - Statistical analysis
 - Anomaly detection
+
+**Cube Viewer Modes**
+- `Spatial X-Y at lambda`: displays an X-Y intensity image at one selected wavelength. Only the wavelength control is active.
+- `Spectrum at X,Y`: plots intensity vs wavelength at one selected X,Y pixel. Only X and Y controls are active.
+- `Y-lambda at X`: displays Y vs wavelength at one fixed X/stage position. Only the X control is active.
+- `X-lambda at Y`: displays X/stage position vs wavelength at one fixed Y pixel. Only the Y control is active.
+
+Saved cube API responses include `cube_shape`, `dimension_order`, `x_positions`/`stage_positions`, `y_axis`/`y_pixels`, `wavelengths_nm`/`lambda_axis`, `frame_count`, `dtype`, `source_scan_folder`, and `creation_timestamp`. The frontend reads these fields and does not infer axis order on its own.
 
 ---
 

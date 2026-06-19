@@ -15,6 +15,7 @@ HARDWARE_LOG_FILE = os.path.join(LOG_DIR, "hardware_log.jsonl")
 ERROR_KNOWLEDGE_FILE = os.path.join(LOG_DIR, "error_knowledge_base.md")
 MAX_ERRORS = 50
 MAX_HARDWARE_EVENTS = 250
+LOG_BACKUP_COUNT = 5
 
 _errors: Deque[dict] = deque(maxlen=MAX_ERRORS)
 _hardware_events: Deque[dict] = deque(maxlen=MAX_HARDWARE_EVENTS)
@@ -114,6 +115,7 @@ def log_error(module: str, error: Exception, severity: str = "ERROR") -> None:
         _errors.append(record)
         try:
             initialize_error_log(load_existing=False)
+            _rotate_if_needed(LOG_FILE)
             with open(LOG_FILE, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
             _append_error_knowledge(timestamp, module_name, severity_name, error_type, message)
@@ -149,6 +151,7 @@ def log_hardware_event(
         _hardware_events.append(record)
         try:
             initialize_error_log(load_existing=False)
+            _rotate_if_needed(HARDWARE_LOG_FILE)
             with open(HARDWARE_LOG_FILE, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             _append_error_knowledge(
@@ -189,11 +192,33 @@ def get_hardware_errors(limit: int = 50) -> list[dict]:
 def _append_error_knowledge(timestamp: str, module: str, severity: str, code: str, message: str) -> None:
     safe = lambda value: str(value).replace("|", "\\|").replace("\n", " ").strip()
     action = _suggest_action(module, message)
+    _rotate_if_needed(ERROR_KNOWLEDGE_FILE)
     with open(ERROR_KNOWLEDGE_FILE, "a", encoding="utf-8") as fh:
         fh.write(
             f"| {safe(timestamp)} | {safe(module)} | {safe(severity)} | "
             f"{safe(code)} | {safe(message)} | {safe(action)} |\n"
         )
+
+
+def _rotate_if_needed(path: str) -> None:
+    try:
+        import config
+
+        policy = getattr(config, "STORAGE_POLICY", {}) or {}
+        max_mb = float(policy.get("max_log_mb", 10))
+        max_bytes = max(1, int(max_mb * 1024 * 1024))
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return
+        for index in range(LOG_BACKUP_COUNT - 1, 0, -1):
+            src = f"{path}.{index}"
+            dst = f"{path}.{index + 1}"
+            if os.path.exists(dst):
+                os.remove(dst)
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(path, f"{path}.1")
+    except Exception:
+        pass
 
 
 def _suggest_action(module: str, message: str) -> str:

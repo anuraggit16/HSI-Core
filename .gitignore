@@ -1,27 +1,52 @@
-venv/
-.venv/
-logs/
-scan_images/
-scans/
-logs/*.log
-logs/*.jsonl
-logs/*.lock
-*.cube
+# Python/runtime
 __pycache__/
 *.pyc
+.venv/
+venv/
 
+# Node/build/install outputs
 node_modules/
-
 dist/
 build/
+installer/generated/
 
-logs/
-*.tiff
+# Generated acquisition and analysis data
+scans/
+data/
+scan_images/
+datasets/
+*.cube
+*.npy
+*.npz
 *.tif
+*.tiff
+*.raw
+*.h5
+*.hdf5
+*.mat
+*.hdr
 *.png
 *.jpg
-*.mat
-*.raw
-*.hdr
-*.npy
-*.npz   
+
+# Logs, temp, and caches
+logs/
+temp/
+cache/
+.cache/
+*.log
+*.jsonl
+*.lock
+
+# Local Codex/app state
+.codex/
+.codex*
+codex*.json
+codex*.md
+
+# Keep empty runtime roots visible
+!scans/.gitkeep
+!data/.gitkeep
+!logs/.gitkeep
+
+# OS/editor noise
+.DS_Store
